@@ -1,0 +1,60 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Audio files
+audio/
+audio_collection/
+audio_all/
+*.mp3
+
+# JSON data
+data/
+*_data.json
+
+# Debug files
+debug_page.html
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# paper
+paper ecc/
+
+# Data files
+phonemeref_data/
+wordlists/
+google-10000-english-usa-no-swears.txt
+
+
+# models
+wavlm-phoneme-recognizer/
