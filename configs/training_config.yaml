@@ -1,0 +1,55 @@
+# ============================================================================
+# Training Configuration - DeepLearning-Phoneme
+# ============================================================================
+
+# Seed per riproducibilità
+seed: 42
+
+# Modello
+model:
+  name: "microsoft/wavlm-base-plus"
+  freeze_feature_encoder: true
+  ctc_loss_reduction: "mean"
+
+# Dati
+data:
+  csv_path: "data/processed/phonemeref_processed.csv"
+  vocab_path: "data/processed/vocab.json"
+  audio_base_path: "data/raw/phonemeref_data"
+  test_size: 0.1
+  sampling_rate: 16000
+
+# Tokenizer
+tokenizer:
+  unk_token: "[UNK]"
+  pad_token: "[PAD]"
+  word_delimiter_token: "|"
+
+# Training
+training:
+  output_dir: "outputs/wavlm-phoneme-recognizer"
+  num_train_epochs: 10
+  per_device_train_batch_size: 8
+  per_device_eval_batch_size: 8
+  gradient_accumulation_steps: 2
+  learning_rate: 1.0e-4
+  warmup_steps: 200
+  weight_decay: 0.01
+  fp16: true
+  
+  # Evaluation & Saving
+  eval_strategy: "steps"
+  eval_steps: 500
+  save_steps: 500
+  save_total_limit: 2
+  load_best_model_at_end: true
+  metric_for_best_model: "per"
+  greater_is_better: false
+  
+  # Logging
+  logging_steps: 100
+  report_to: "none"  # oppure "tensorboard", "wandb"
+  
+  # Misc
+  group_by_length: false
+  push_to_hub: false

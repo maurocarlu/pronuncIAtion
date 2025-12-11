@@ -1,0 +1,56 @@
+# ============================================================================
+# Training Configuration - Baseline (non-augmented) - CPU/Local
+# ============================================================================
+
+# Seed per riproducibilità
+seed: 42
+
+# Modello
+model:
+  name: "microsoft/wavlm-base-plus"
+  freeze_feature_encoder: true
+  ctc_loss_reduction: "mean"
+
+# Dati - USA SOLO IL DATASET ORIGINALE (NON AUGMENTATO)
+data:
+  csv_path: "data/processed/phonemeref_processed.csv"
+  vocab_path: "data/processed/vocab.json"
+  audio_base_path: "data/raw/phonemeref_data"
+  test_size: 0.1
+  sampling_rate: 16000
+
+# Tokenizer
+tokenizer:
+  unk_token: "[UNK]"
+  pad_token: "[PAD]"
+  word_delimiter_token: "|"
+
+# Training - OTTIMIZZATO PER CPU con GRADIENT CLIPPING
+training:
+  output_dir: "outputs/baseline_model"
+  num_train_epochs: 15
+  per_device_train_batch_size: 4      # Ridotto per CPU
+  per_device_eval_batch_size: 4
+  gradient_accumulation_steps: 4      # Compensare batch piccolo
+  learning_rate: 3.0e-5               # RIDOTTO da 1e-4 per stabilità
+  warmup_steps: 500                   # AUMENTATO per stabilità
+  weight_decay: 0.01
+  fp16: false                         # Disabilitato per CPU
+  max_grad_norm: 1.0                  # GRADIENT CLIPPING - critico!
+  
+  # Evaluation & Saving
+  eval_strategy: "steps"
+  eval_steps: 200                     # Più frequente per monitorare
+  save_steps: 200
+  save_total_limit: 3
+  load_best_model_at_end: true
+  metric_for_best_model: "per"
+  greater_is_better: false
+  
+  # Logging
+  logging_steps: 50                   # Più frequente per debug
+  report_to: "none"
+  
+  # Misc
+  group_by_length: true               # Raggruppa per efficienza
+  push_to_hub: false

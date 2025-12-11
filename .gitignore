@@ -1,3 +1,7 @@
+# ============================================================================
+# DeepLearning-Phoneme .gitignore
+# ============================================================================
+
 # Python
 __pycache__/
 *.py[cod]
@@ -6,6 +10,7 @@ __pycache__/
 .Python
 env/
 venv/
+.venv/
 ENV/
 build/
 develop-eggs/
@@ -23,18 +28,36 @@ wheels/
 .installed.cfg
 *.egg
 
-# Audio files
-audio/
-audio_collection/
-audio_all/
+# Audio files (troppo grandi)
 *.mp3
+*.wav
+*.ogg
+*.flac
 
-# JSON data
-data/
-*_data.json
+# Vecchi dati in root (ora spostati in data/)
+phonemeref_data/
+phonemeref_metadata.csv
+phonemeref_processed.csv
+vocab.json
 
-# Debug files
-debug_page.html
+# Nuova struttura dati (escludiamo audio/json pesanti)
+data/raw/phonemeref_data/audio/
+data/raw/phonemeref_data/json/
+
+# Modelli (troppo grandi)
+outputs/
+wavlm-phoneme-recognizer/
+*.pt
+*.pth
+*.bin
+*.safetensors
+*.ckpt
+
+# Logs
+logs/
+*.log
+wandb/
+runs/
 
 # IDE
 .vscode/
@@ -47,7 +70,23 @@ debug_page.html
 .DS_Store
 Thumbs.db
 
-# paper
+# Jupyter
+.ipynb_checkpoints/
+
+# Cache
+.cache/
+__pycache__/
+
+# Temporanei
+*.tmp
+*.temp
+*.bak
+
+# Keep placeholder files
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+!outputs/.gitkeep
+!logs/.gitkeep
 paper ecc/
 
 # Data files

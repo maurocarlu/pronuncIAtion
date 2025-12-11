@@ -1,0 +1,46 @@
+# ============================================================================
+# DeepLearning-Phoneme Requirements
+# ============================================================================
+
+# Web scraping (per data collection)
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+lxml>=4.9.0
+
+# Deep Learning - PyTorch
+torch>=2.0.0
+torchaudio>=2.0.0
+
+# HuggingFace
+transformers>=4.35.0
+datasets>=2.14.0
+evaluate>=0.4.0
+
+# Metriche e utilità
+jiwer
+accelerate
+safetensors>=0.4.0
+
+# Audio processing
+soundfile>=0.12.0
+librosa>=0.10.0
+
+# Audio augmentation
+audiomentations>=0.33.0
+
+# TTS (Text-to-Speech)
+edge-tts>=6.1.0
+
+# Phonemizer (richiede espeak-ng installato)
+phonemizer>=3.2.0
+
+# ARPABET to IPA converter
+arpa2ipa
+
+# Data processing
+pandas>=2.0.0
+numpy>=1.24.0
+
+# Utilities
+pyyaml>=6.0
+tqdm>=4.65.0
