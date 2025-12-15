@@ -16,7 +16,9 @@ data:
   csv_path: "data/processed/phonemeref_processed.csv"
   vocab_path: "data/processed/vocab.json"
   audio_base_path: "data/raw/phonemeref_data"
-  test_size: 0.1
+  # Split: 90% train, 5% validation, 5% test
+  val_size: 0.05
+  test_size: 0.05
   sampling_rate: 16000
 
 # Tokenizer
@@ -32,8 +34,8 @@ training:
   per_device_train_batch_size: 8
   per_device_eval_batch_size: 8
   gradient_accumulation_steps: 2
-  learning_rate: 1.0e-4
-  warmup_steps: 200
+  learning_rate: 3.0e-5
+  warmup_steps: 500
   weight_decay: 0.01
   fp16: true
   

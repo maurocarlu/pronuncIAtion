@@ -1,12 +1,16 @@
 """
 Modulo per preprocessing dataset e creazione vocabolario.
+
+Utilizza il modulo normalize_ipa per normalizzazione IPA consistente.
 """
 
 import json
 import pandas as pd
 from collections import Counter
 from pathlib import Path
-from typing import Tuple, Dict
+from typing import Tuple, Dict, Optional
+
+from .normalize_ipa import IPANormalizer, normalize_for_training
 
 
 class PhonemePreprocessor:
@@ -18,17 +22,35 @@ class PhonemePreprocessor:
         "|": 2  # Word delimiter
     }
     
-    def __init__(self, min_freq: int = 1):
+    def __init__(
+        self,
+        min_freq: int = 1,
+        normalize_mode: Optional[str] = None,
+    ):
         """
         Args:
             min_freq: Frequenza minima per includere un carattere nel vocab
+            normalize_mode: Modalità di normalizzazione IPA:
+                - None: Solo rimuove delimitatori (comportamento originale)
+                - 'training': Normalizzazione per training (rimuove stress)
+                - 'strict': Normalizzazione completa
         """
         self.min_freq = min_freq
+        self.normalize_mode = normalize_mode
         self.vocab: Dict[str, int] = {}
         self.char_counts: Counter = Counter()
+        
+        # Inizializza normalizzatore se richiesto
+        if normalize_mode:
+            self.normalizer = IPANormalizer(mode=normalize_mode)
+        else:
+            self.normalizer = None
     
     def clean_ipa(self, text: str) -> str:
-        """Pulisce stringa IPA rimuovendo delimitatori."""
+        """
+        Pulisce stringa IPA rimuovendo delimitatori.
+        Se normalize_mode è impostato, applica anche normalizzazione.
+        """
         if not isinstance(text, str):
             return ""
         text = text.strip()
@@ -36,7 +58,14 @@ class PhonemePreprocessor:
             text = text[1:]
         if text.endswith('/'):
             text = text[:-1]
-        return text.strip()
+        text = text.strip()
+        
+        # Applica normalizzazione se configurata
+        if self.normalizer:
+            text = self.normalizer.normalize(text)
+        
+        return text
+
     
     def process_dataframe(self, df: pd.DataFrame, ipa_column: str = "ipa") -> pd.DataFrame:
         """
@@ -59,6 +88,48 @@ class PhonemePreprocessor:
         
         if removed > 0:
             print(f"⚠️  Rimosse {removed} righe con IPA vuoto")
+        
+        return df
+    
+    def add_split_column(
+        self,
+        df: pd.DataFrame,
+        val_size: float = 0.05,
+        test_size: float = 0.05,
+        seed: int = 42,
+    ) -> pd.DataFrame:
+        """
+        Aggiunge colonna 'split' al DataFrame se non presente.
+        
+        Args:
+            df: DataFrame da processare
+            val_size: Proporzione validation set
+            test_size: Proporzione test set
+            seed: Random seed
+            
+        Returns:
+            DataFrame con colonna 'split'
+        """
+        import numpy as np
+        
+        if 'split' in df.columns:
+            print("✓ Colonna 'split' già presente")
+            return df
+        
+        np.random.seed(seed)
+        
+        n = len(df)
+        n_test = int(n * test_size)
+        n_val = int(n * val_size)
+        n_train = n - n_test - n_val
+        
+        splits = ['train'] * n_train + ['validation'] * n_val + ['test'] * n_test
+        np.random.shuffle(splits)
+        
+        df = df.copy()
+        df['split'] = splits
+        
+        print(f"✓ Creata colonna 'split': train={n_train}, val={n_val}, test={n_test}")
         
         return df
     

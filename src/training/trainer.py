@@ -76,7 +76,8 @@ class TrainingConfig:
     csv_path: str = "data/processed/phonemeref_processed.csv"
     vocab_path: str = "data/processed/vocab.json"
     audio_base_path: str = "data/raw/phonemeref_data"
-    test_size: float = 0.1
+    val_size: float = 0.05   # Validation split
+    test_size: float = 0.05  # Test split (90/5/5 default)
     sampling_rate: int = 16000
     
     output_dir: str = "outputs/wavlm-phoneme-recognizer"
@@ -128,6 +129,7 @@ class TrainingConfig:
             flat_config['csv_path'] = config['data'].get('csv_path', cls.csv_path)
             flat_config['vocab_path'] = config['data'].get('vocab_path', cls.vocab_path)
             flat_config['audio_base_path'] = config['data'].get('audio_base_path', cls.audio_base_path)
+            flat_config['val_size'] = config['data'].get('val_size', cls.val_size)
             flat_config['test_size'] = config['data'].get('test_size', cls.test_size)
             flat_config['sampling_rate'] = config['data'].get('sampling_rate', cls.sampling_rate)
         
@@ -265,8 +267,24 @@ class PhonemeTrainer:
         
         dataset = dataset.map(fix_audio_path)
         
-        # Split train/test
-        dataset = dataset.train_test_split(test_size=self.config.test_size, seed=self.config.seed)
+        # Split train/val/test (90/5/5 or custom)
+        # First split: separate test set
+        total_eval_size = self.config.val_size + self.config.test_size
+        split1 = dataset.train_test_split(test_size=total_eval_size, seed=self.config.seed)
+        
+        # Second split: separate val from test
+        val_ratio = self.config.val_size / total_eval_size
+        split2 = split1["test"].train_test_split(test_size=(1 - val_ratio), seed=self.config.seed)
+        
+        # Combine into final dataset dict
+        from datasets import DatasetDict
+        dataset = DatasetDict({
+            "train": split1["train"],
+            "validation": split2["train"],
+            "test": split2["test"]
+        })
+        
+        print(f">>> Split: train={len(dataset['train'])}, val={len(dataset['validation'])}, test={len(dataset['test'])}")
         
         # Cast audio column
         dataset = dataset.cast_column(
@@ -411,7 +429,7 @@ class PhonemeTrainer:
             args=training_args,
             compute_metrics=self.get_compute_metrics(),
             train_dataset=encoded_dataset["train"],
-            eval_dataset=encoded_dataset["test"],
+            eval_dataset=encoded_dataset["validation"],  # Use validation set for eval during training
             processing_class=self.processor,
         )
         

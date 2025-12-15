@@ -1,11 +1,11 @@
 """
 Script per valutazione su SpeechOcean762 (speaker non-nativi).
 
-Mappatura ARPABET->IPA basata su: https://github.com/chorusai/arpa2ipa
+Utilizza il modulo centralizzato di normalizzazione IPA per garantire
+consistenza tra training e evaluation.
 """
 
 import argparse
-import re
 import sys
 from pathlib import Path
 
@@ -14,96 +14,47 @@ import numpy as np
 import evaluate
 from datasets import load_dataset, Audio
 
-# Aggiungi il path per importare arpa2ipa locale
-sys.path.insert(0, str(Path(__file__).parent.parent / "arpa2ipa"))
-from arpa2ipa._arpa_to_ipa import arpa_to_ipa_lookup
-
+# Aggiungi src al path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-
-def normalize_ipa(ipa_text: str) -> str:
-    """
-    Normalizzazione aggressiva delle stringhe IPA.
-    
-    Rimuove:
-    - Accenti primari (ˈ) e secondari (ˌ)
-    - Indicatori di lunghezza (ː)
-    - Separatori di sillabe (.)
-    - Spazi extra
-    - Delimitatori di parole (|)
-    
-    Normalizza varianti US/UK:
-    - oʊ → əʊ (o entrambi → ou semplificato)
-    
-    Args:
-        ipa_text: Stringa IPA da normalizzare
-        
-    Returns:
-        Stringa IPA pulita
-    """
-    if not isinstance(ipa_text, str):
-        return ""
-    
-    # 1. Rimuovi accenti primari (ˈ) e secondari (ˌ)
-    text = re.sub(r"[ˈˌ]", "", ipa_text)
-    
-    # 2. Rimuovi indicatori di lunghezza (ː)
-    text = re.sub(r"[ː]", "", text)
-    
-    # 3. Rimuovi separatori di sillabe (.) e spazi extra
-    text = re.sub(r"[.\s]", "", text)
-    
-    # 4. Rimuovi delimitatori di parole (|)
-    text = re.sub(r"\|", "", text)
-    
-    # 5. Normalizza varianti rhotic (ʳ → r)
-    text = text.replace("ʳ", "r")
-    
-    # 6. Normalizza varianti g (ɡ → g)
-    text = text.replace("ɡ", "g")
-    
-    # 7. Normalizza dittonghi UK/US per confronto equo
-    # Il modello UK produce əʊ, arpa2ipa produce oʊ
-    text = text.replace("əʊ", "oʊ")
-    
-    # 8. Normalizza vocali r-colored (ɜr vs ɜːr)
-    text = text.replace("ɜːr", "ɜr")
-    
-    return text
-
-
-def arpabet_to_ipa(arpabet_phone: str) -> str:
-    """
-    Converte singolo fonema ARPABET in IPA usando la mappatura da chorusai/arpa2ipa.
-    """
-    # Lookup diretto (include già le varianti con stress 0,1,2)
-    if arpabet_phone in arpa_to_ipa_lookup:
-        return arpa_to_ipa_lookup[arpabet_phone]
-    
-    # Fallback: rimuovi numeri di stress e riprova
-    phone_clean = ''.join(c for c in arpabet_phone if not c.isdigit())
-    return arpa_to_ipa_lookup.get(phone_clean, "")
+# Importa il modulo di normalizzazione centralizzato
+from src.data.normalize_ipa import (
+    IPANormalizer,
+    normalize_for_evaluation,
+    arpa_to_ipa,
+    get_corrected_arpa_to_ipa_mapping,
+)
 
 
 def extract_phones_from_words(words_list: list) -> str:
-    """Estrae e converte tutti i fonemi dalla lista di parole."""
+    """
+    Estrae e converte tutti i fonemi dalla lista di parole.
+    Usa la mappatura ARPA→IPA corretta (EH→ɛ).
+    """
     all_phones_ipa = []
     for word_info in words_list:
         phones = word_info.get("phones", [])
         for p in phones:
-            ipa = arpabet_to_ipa(p)
+            ipa = arpa_to_ipa(p, use_corrected=True)
             if ipa:
                 all_phones_ipa.append(ipa)
     return "".join(all_phones_ipa)
 
 
-def evaluate_speechocean(model_path: str):
+def evaluate_speechocean(model_path: str, verbose: bool = True):
     """Valuta modello su SpeechOcean762."""
     from transformers import Wav2Vec2Processor, WavLMForCTC
+    
+    # Inizializza normalizzatore
+    normalizer = IPANormalizer(mode='strict')
     
     print("=" * 60)
     print("🌊 VALUTAZIONE SU SPEECHOCEAN762 (Non-Native Speakers)")
     print("=" * 60)
+    print("\n📋 Configurazione normalizzazione:")
+    print(f"   Mode: {normalizer.mode}")
+    print(f"   Normalize e→ɛ: {normalizer.normalize_e}")
+    print(f"   Remove stress: {normalizer.remove_stress}")
     
     # Carica modello
     print("\n📦 Caricamento modello...")
@@ -123,7 +74,7 @@ def evaluate_speechocean(model_path: str):
         example["reference_ipa"] = extract_phones_from_words(example["words"])
         return example
     
-    print("\n🔄 Conversione fonemi ARPABET → IPA...")
+    print("\n🔄 Conversione fonemi ARPABET → IPA (mappatura corretta)...")
     ds = ds.map(prepare_example)
     ds = ds.filter(lambda x: len(x["reference_ipa"]) > 0)
     print(f"✓ Esempi validi: {len(ds)}")
@@ -153,11 +104,17 @@ def evaluate_speechocean(model_path: str):
     print("\n📊 Calcolo metriche...")
     cer_metric = evaluate.load("cer")
     
-    # Applica normalizzazione IPA
-    print("🧹 Normalizzazione stringhe IPA in corso...")
+    # Applica normalizzazione IPA usando il modulo centralizzato
+    print("🧹 Normalizzazione stringhe IPA...")
     
-    clean_preds = [normalize_ipa(p) for p in results["predicted_ipa"]]
-    clean_refs = [normalize_ipa(r) for r in results["reference_ipa"]]
+    clean_preds = [normalizer.normalize(p) for p in results["predicted_ipa"]]
+    clean_refs = [normalizer.normalize(r) for r in results["reference_ipa"]]
+    
+    # Debug: check first few examples before filtering
+    print("\n🔍 Debug - Prime 5 predizioni:")
+    for i in range(min(5, len(results))):
+        print(f"  [{i}] pred='{results['predicted_ipa'][i][:50]}...' -> clean='{clean_preds[i][:50] if clean_preds[i] else 'EMPTY'}'")
+        print(f"      ref='{results['reference_ipa'][i][:50]}' -> clean='{clean_refs[i][:50] if clean_refs[i] else 'EMPTY'}'")
     
     # Filtra stringhe vuote
     valid_preds = []
@@ -175,6 +132,23 @@ def evaluate_speechocean(model_path: str):
             orig_preds.append(orig_p)
             orig_refs.append(orig_r)
     
+    print(f"\n📊 Statistiche filtro:")
+    print(f"   Totale esempi: {len(results)}")
+    print(f"   Predizioni vuote: {sum(1 for p in clean_preds if not p)}")
+    print(f"   Riferimenti vuoti: {sum(1 for r in clean_refs if not r)}")
+    print(f"   Coppie valide: {len(valid_preds)}")
+    
+    # Handle empty results
+    if len(valid_preds) == 0:
+        print("\n❌ ERRORE: Nessuna coppia valida trovata!")
+        print("   Possibili cause:")
+        print("   - Il modello produce predizioni vuote")
+        print("   - La normalizzazione è troppo aggressiva")
+        print("\n   Debug: mostra esempi raw...")
+        for i in range(min(5, len(results))):
+            print(f"   Pred raw: '{results['predicted_ipa'][i]}'")
+        return 1.0  # Return 100% error
+    
     # Calcola PER normalizzato
     per = cer_metric.compute(predictions=valid_preds, references=valid_refs)
     
@@ -182,13 +156,14 @@ def evaluate_speechocean(model_path: str):
     per_raw = cer_metric.compute(predictions=orig_preds, references=orig_refs)
     
     # Debug: mostra esempi di normalizzazione
-    print("\n🔍 Esempi post-pulizia:")
-    for i in range(min(3, len(orig_refs))):
-        print(f"\n--- Esempio {i+1} ---")
-        print(f"Ref Orig:   '{orig_refs[i]}'")
-        print(f"Ref Clean:  '{valid_refs[i]}'")
-        print(f"Pred Orig:  '{orig_preds[i]}'")
-        print(f"Pred Clean: '{valid_preds[i]}'")
+    if verbose:
+        print("\n🔍 Esempi post-normalizzazione:")
+        for i in range(min(3, len(orig_refs))):
+            print(f"\n--- Esempio {i+1} ---")
+            print(f"Ref Orig:   '{orig_refs[i]}'")
+            print(f"Ref Clean:  '{valid_refs[i]}'")
+            print(f"Pred Orig:  '{orig_preds[i]}'")
+            print(f"Pred Clean: '{valid_preds[i]}'")
     
     # Risultati
     print("\n" + "=" * 60)
@@ -213,8 +188,8 @@ def evaluate_speechocean(model_path: str):
     
     for i in range(len(results)):
         score = results[i]["accuracy"]
-        pred = normalize_ipa(results[i]["predicted_ipa"])
-        ref = normalize_ipa(results[i]["reference_ipa"])
+        pred = normalizer.normalize(results[i]["predicted_ipa"])
+        ref = normalizer.normalize(results[i]["reference_ipa"])
         
         if not pred or not ref:
             continue
@@ -234,31 +209,32 @@ def evaluate_speechocean(model_path: str):
             print(f"  {bucket_name}: PER = {avg_per:.2f}% (n={len(pers)})")
     
     # Esempi
-    print("\n" + "=" * 60)
-    print("📝 ESEMPI DI PREDIZIONI")
-    print("=" * 60)
-    
-    np.random.seed(42)
-    sample_indices = np.random.choice(len(results), min(10, len(results)), replace=False)
-    
-    for i, idx in enumerate(sample_indices, 1):
-        ex = results[int(idx)]
-        pred_clean = normalize_ipa(ex['predicted_ipa'])
-        ref_clean = normalize_ipa(ex['reference_ipa'])
+    if verbose:
+        print("\n" + "=" * 60)
+        print("📝 ESEMPI DI PREDIZIONI")
+        print("=" * 60)
         
-        print(f"\n--- Esempio {i} (Score: {ex['accuracy']}/10, Età: {ex['age']}) ---")
-        print(f"Testo:      {ex['text']}")
-        print(f"Ref (IPA):  /{ex['reference_ipa']}/")
-        print(f"Ref Clean:  /{ref_clean}/")
-        print(f"Pred:       /{ex['predicted_ipa']}/")
-        print(f"Pred Clean: /{pred_clean}/")
+        np.random.seed(42)
+        sample_indices = np.random.choice(len(results), min(10, len(results)), replace=False)
         
-        if pred_clean and ref_clean:
-            single_per = cer_metric.compute(
-                predictions=[pred_clean],
-                references=[ref_clean]
-            )
-            print(f"PER:        {single_per*100:.2f}%")
+        for i, idx in enumerate(sample_indices, 1):
+            ex = results[int(idx)]
+            pred_clean = normalizer.normalize(ex['predicted_ipa'])
+            ref_clean = normalizer.normalize(ex['reference_ipa'])
+            
+            print(f"\n--- Esempio {i} (Score: {ex['accuracy']}/10, Età: {ex['age']}) ---")
+            print(f"Testo:      {ex['text']}")
+            print(f"Ref (IPA):  /{ex['reference_ipa']}/")
+            print(f"Ref Clean:  /{ref_clean}/")
+            print(f"Pred:       /{ex['predicted_ipa']}/")
+            print(f"Pred Clean: /{pred_clean}/")
+            
+            if pred_clean and ref_clean:
+                single_per = cer_metric.compute(
+                    predictions=[pred_clean],
+                    references=[ref_clean]
+                )
+                print(f"PER:        {single_per*100:.2f}%")
     
     print("\n" + "=" * 60)
     print("✓ Valutazione completata!")
@@ -275,9 +251,14 @@ def main():
         default="outputs/final_model",
         help="Path to trained model"
     )
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Reduce verbosity"
+    )
     
     args = parser.parse_args()
-    evaluate_speechocean(args.model_path)
+    evaluate_speechocean(args.model_path, verbose=not args.quiet)
 
 
 if __name__ == "__main__":
