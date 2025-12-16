@@ -1,6 +1,11 @@
 """
 Script per valutazione su SpeechOcean762 (speaker non-nativi).
 
+BENCHMARK SCIENTIFICO con 3 Task:
+- TASK A: ASR Robustness (PER su alta qualità)
+- TASK B: Scoring Correlation (correlazione con score umani)
+- TASK C: Mispronunciation Detection (classificazione binaria)
+
 Utilizza il modulo centralizzato di normalizzazione IPA per garantire
 consistenza tra training e evaluation.
 """
@@ -10,6 +15,7 @@ import sys
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 import numpy as np
 import evaluate
 from datasets import load_dataset, Audio
@@ -42,19 +48,20 @@ def extract_phones_from_words(words_list: list) -> str:
 
 
 def evaluate_speechocean(model_path: str, verbose: bool = True):
-    """Valuta modello su SpeechOcean762."""
+    """Valuta modello su SpeechOcean762 con benchmark scientifico completo."""
     from transformers import Wav2Vec2Processor, WavLMForCTC
+    from scipy.stats import pearsonr, spearmanr
+    from sklearn.metrics import roc_auc_score, precision_recall_fscore_support, classification_report
     
     # Inizializza normalizzatore
     normalizer = IPANormalizer(mode='strict')
     
-    print("=" * 60)
-    print("🌊 VALUTAZIONE SU SPEECHOCEAN762 (Non-Native Speakers)")
-    print("=" * 60)
-    print("\n📋 Configurazione normalizzazione:")
-    print(f"   Mode: {normalizer.mode}")
-    print(f"   Normalize e→ɛ: {normalizer.normalize_e}")
-    print(f"   Remove stress: {normalizer.remove_stress}")
+    print("=" * 70)
+    print("🔬 BENCHMARK SCIENTIFICO - SPEECHOCEAN762")
+    print("=" * 70)
+    print("\n📋 Configurazione:")
+    print(f"   Modello: {model_path}")
+    print(f"   Normalizzazione IPA: {normalizer.mode}")
     
     # Carica modello
     print("\n📦 Caricamento modello...")
@@ -74,13 +81,16 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
         example["reference_ipa"] = extract_phones_from_words(example["words"])
         return example
     
-    print("\n🔄 Conversione fonemi ARPABET → IPA (mappatura corretta)...")
+    print("\n🔄 Conversione fonemi ARPABET → IPA...")
     ds = ds.map(prepare_example)
     ds = ds.filter(lambda x: len(x["reference_ipa"]) > 0)
     print(f"✓ Esempi validi: {len(ds)}")
     
-    # Predizione
-    def predict(batch):
+    # ==========================================================================
+    # PREDIZIONE CON CONFIDENCE SCORE
+    # ==========================================================================
+    def predict_with_confidence(batch):
+        """Predice IPA e calcola confidence score."""
         audio_arrays = [x["array"] for x in batch["audio"]]
         
         inputs = processor(
@@ -93,158 +103,272 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
         with torch.no_grad():
             logits = model(inputs.input_values).logits
         
+        # Predizioni
         predicted_ids = torch.argmax(logits, dim=-1)
         batch["predicted_ipa"] = processor.batch_decode(predicted_ids)
+        
+        # Calcola confidence score
+        # Applica softmax per ottenere probabilità
+        probs = F.softmax(logits, dim=-1)
+        
+        # Per ogni sequenza, prendi la probabilità massima di ogni token
+        max_probs = torch.max(probs, dim=-1).values  # [batch, seq_len]
+        
+        # Maschera per ignorare padding (token con id 0 = PAD)
+        # Calcola confidence media escludendo PAD tokens
+        confidence_scores = []
+        for i in range(len(audio_arrays)):
+            # Trova token non-PAD
+            non_pad_mask = predicted_ids[i] != processor.tokenizer.pad_token_id
+            if non_pad_mask.sum() > 0:
+                conf = max_probs[i][non_pad_mask].mean().item()
+            else:
+                conf = 0.0
+            confidence_scores.append(conf)
+        
+        batch["confidence_score"] = confidence_scores
         return batch
     
-    print("\n🔄 Esecuzione inferenza...")
-    results = ds.map(predict, batched=True, batch_size=4)
+    print("\n🔄 Esecuzione inferenza con confidence scoring...")
+    results = ds.map(predict_with_confidence, batched=True, batch_size=4)
     
-    # Metriche
-    print("\n📊 Calcolo metriche...")
+    # ==========================================================================
+    # PREPARA DATI PER ANALISI
+    # ==========================================================================
+    print("\n📊 Preparazione dati per analisi...")
     cer_metric = evaluate.load("cer")
     
-    # Applica normalizzazione IPA usando il modulo centralizzato
-    print("🧹 Normalizzazione stringhe IPA...")
-    
-    clean_preds = [normalizer.normalize(p) for p in results["predicted_ipa"]]
-    clean_refs = [normalizer.normalize(r) for r in results["reference_ipa"]]
-    
-    # Debug: check first few examples before filtering
-    print("\n🔍 Debug - Prime 5 predizioni:")
-    for i in range(min(5, len(results))):
-        print(f"  [{i}] pred='{results['predicted_ipa'][i][:50]}...' -> clean='{clean_preds[i][:50] if clean_preds[i] else 'EMPTY'}'")
-        print(f"      ref='{results['reference_ipa'][i][:50]}' -> clean='{clean_refs[i][:50] if clean_refs[i] else 'EMPTY'}'")
-    
-    # Filtra stringhe vuote
-    valid_preds = []
-    valid_refs = []
-    orig_preds = []
-    orig_refs = []
-    
-    for pred, ref, orig_p, orig_r in zip(
-        clean_preds, clean_refs, 
-        results["predicted_ipa"], results["reference_ipa"]
-    ):
-        if pred and ref:
-            valid_preds.append(pred)
-            valid_refs.append(ref)
-            orig_preds.append(orig_p)
-            orig_refs.append(orig_r)
-    
-    print(f"\n📊 Statistiche filtro:")
-    print(f"   Totale esempi: {len(results)}")
-    print(f"   Predizioni vuote: {sum(1 for p in clean_preds if not p)}")
-    print(f"   Riferimenti vuoti: {sum(1 for r in clean_refs if not r)}")
-    print(f"   Coppie valide: {len(valid_preds)}")
-    
-    # Handle empty results
-    if len(valid_preds) == 0:
-        print("\n❌ ERRORE: Nessuna coppia valida trovata!")
-        print("   Possibili cause:")
-        print("   - Il modello produce predizioni vuote")
-        print("   - La normalizzazione è troppo aggressiva")
-        print("\n   Debug: mostra esempi raw...")
-        for i in range(min(5, len(results))):
-            print(f"   Pred raw: '{results['predicted_ipa'][i]}'")
-        return 1.0  # Return 100% error
-    
-    # Calcola PER normalizzato
-    per = cer_metric.compute(predictions=valid_preds, references=valid_refs)
-    
-    # Calcola anche PER non-normalizzato per confronto
-    per_raw = cer_metric.compute(predictions=orig_preds, references=orig_refs)
-    
-    # Debug: mostra esempi di normalizzazione
-    if verbose:
-        print("\n🔍 Esempi post-normalizzazione:")
-        for i in range(min(3, len(orig_refs))):
-            print(f"\n--- Esempio {i+1} ---")
-            print(f"Ref Orig:   '{orig_refs[i]}'")
-            print(f"Ref Clean:  '{valid_refs[i]}'")
-            print(f"Pred Orig:  '{orig_preds[i]}'")
-            print(f"Pred Clean: '{valid_preds[i]}'")
-    
-    # Risultati
-    print("\n" + "=" * 60)
-    print("📈 RISULTATI SU SPEECHOCEAN762")
-    print("=" * 60)
-    print(f"\n🎯 Phoneme Error Rate (PER):")
-    print(f"   - RAW (senza normalizzazione): {per_raw*100:.2f}%")
-    print(f"   - NORMALIZZATO:                {per*100:.2f}%")
-    print(f"\n✨ Accuratezza Normalizzata: {(1-per)*100:.2f}%")
-    print(f"   Esempi valutati: {len(valid_preds)}")
-    
-    # Analisi per fasce di score
-    print("\n" + "=" * 60)
-    print("📊 ANALISI PER QUALITÀ PRONUNCIA (Score Umano)")
-    print("=" * 60)
-    
-    score_buckets = {
-        "Bassa (1-4)": [],
-        "Media (5-7)": [],
-        "Alta (8-10)": []
-    }
-    
+    # Raccogli tutti i dati
+    all_data = []
     for i in range(len(results)):
-        score = results[i]["accuracy"]
         pred = normalizer.normalize(results[i]["predicted_ipa"])
         ref = normalizer.normalize(results[i]["reference_ipa"])
         
         if not pred or not ref:
             continue
         
-        single_per = cer_metric.compute(predictions=[pred], references=[ref])
+        # Calcola PER singolo
+        per = cer_metric.compute(predictions=[pred], references=[ref])
         
-        if score <= 4:
-            score_buckets["Bassa (1-4)"].append(single_per)
-        elif score <= 7:
-            score_buckets["Media (5-7)"].append(single_per)
-        else:
-            score_buckets["Alta (8-10)"].append(single_per)
+        all_data.append({
+            "human_score": results[i]["accuracy"],
+            "confidence_score": results[i]["confidence_score"],
+            "per": per,
+            "pred": pred,
+            "ref": ref,
+            "text": results[i]["text"],
+            "age": results[i]["age"],
+        })
     
-    for bucket_name, pers in score_buckets.items():
-        if pers:
-            avg_per = np.mean(pers) * 100
-            print(f"  {bucket_name}: PER = {avg_per:.2f}% (n={len(pers)})")
+    print(f"   Esempi validi per analisi: {len(all_data)}")
     
-    # Esempi
+    # Converti in arrays
+    human_scores = np.array([d["human_score"] for d in all_data])
+    confidence_scores = np.array([d["confidence_score"] for d in all_data])
+    pers = np.array([d["per"] for d in all_data])
+    
+    # ==========================================================================
+    # TASK A: ASR ROBUSTNESS (Solo High Quality)
+    # ==========================================================================
+    print("\n" + "=" * 70)
+    print("📋 TASK A: ASR ROBUSTNESS (Phoneme Recognition Quality)")
+    print("=" * 70)
+    print("   Obiettivo: Verificare che su pronunce di alta qualità (score >= 8)")
+    print("              il modello trascriva correttamente i fonemi.")
+    print("-" * 70)
+    
+    # Filtra solo high quality
+    high_quality_mask = human_scores >= 8
+    high_quality_preds = [d["pred"] for d, m in zip(all_data, high_quality_mask) if m]
+    high_quality_refs = [d["ref"] for d, m in zip(all_data, high_quality_mask) if m]
+    
+    if len(high_quality_preds) > 0:
+        per_high = cer_metric.compute(predictions=high_quality_preds, references=high_quality_refs)
+        
+        print(f"\n   📊 Risultati su High Quality (score >= 8):")
+        print(f"   ─────────────────────────────────────────")
+        print(f"   Campioni: {len(high_quality_preds)}")
+        print(f"   PER:      {per_high * 100:.2f}%")
+        print(f"   Accuracy: {(1 - per_high) * 100:.2f}%")
+        
+        # Breakdown per fascia
+        for threshold in [8, 9, 10]:
+            mask = human_scores == threshold
+            preds = [d["pred"] for d, m in zip(all_data, mask) if m]
+            refs = [d["ref"] for d, m in zip(all_data, mask) if m]
+            if len(preds) > 0:
+                per_t = cer_metric.compute(predictions=preds, references=refs)
+                print(f"      Score {threshold}: PER = {per_t * 100:.2f}% (n={len(preds)})")
+    else:
+        print("   ⚠️ Nessun esempio high quality trovato!")
+        per_high = 1.0
+    
+    # ==========================================================================
+    # TASK B: SCORING CORRELATION (Intero Dataset)
+    # ==========================================================================
+    print("\n" + "=" * 70)
+    print("📋 TASK B: SCORING CORRELATION (Confidence vs Human Score)")
+    print("=" * 70)
+    print("   Obiettivo: Verificare correlazione tra confidence del modello")
+    print("              e giudizio umano sulla qualità della pronuncia.")
+    print("-" * 70)
+    
+    # Calcola correlazioni
+    pearson_corr, pearson_p = pearsonr(confidence_scores, human_scores)
+    spearman_corr, spearman_p = spearmanr(confidence_scores, human_scores)
+    
+    # Correlazione inversa con PER (più PER = peggiore pronuncia)
+    pearson_per, pearson_per_p = pearsonr(1 - pers, human_scores)
+    spearman_per, spearman_per_p = spearmanr(1 - pers, human_scores)
+    
+    print(f"\n   📊 Correlazione Confidence ↔ Human Score:")
+    print(f"   ──────────────────────────────────────────")
+    print(f"   Pearson:  r = {pearson_corr:.4f} (p = {pearson_p:.2e})")
+    print(f"   Spearman: ρ = {spearman_corr:.4f} (p = {spearman_p:.2e})")
+    
+    print(f"\n   📊 Correlazione (1 - PER) ↔ Human Score:")
+    print(f"   ──────────────────────────────────────────")
+    print(f"   Pearson:  r = {pearson_per:.4f} (p = {pearson_per_p:.2e})")
+    print(f"   Spearman: ρ = {spearman_per:.4f} (p = {spearman_per_p:.2e})")
+    
+    # Interpretazione
+    if abs(spearman_corr) >= 0.7:
+        interp = "✅ FORTE correlazione - il modello discrimina bene"
+    elif abs(spearman_corr) >= 0.5:
+        interp = "⚠️ MODERATA correlazione - margine di miglioramento"
+    else:
+        interp = "❌ DEBOLE correlazione - il modello non discrimina bene"
+    print(f"\n   Interpretazione: {interp}")
+    
+    # ==========================================================================
+    # TASK C: MISPRONUNCIATION DETECTION (Classificazione Binaria)
+    # ==========================================================================
+    print("\n" + "=" * 70)
+    print("📋 TASK C: MISPRONUNCIATION DETECTION (Binary Classification)")
+    print("=" * 70)
+    print("   Obiettivo: Classificare pronuncia come Corretta/Errata")
+    print("              usando il confidence score come predittore.")
+    print("   Labels: Errata (score <= 6), Corretta (score > 6)")
+    print("-" * 70)
+    
+    # Crea label binarie
+    # 1 = Pronuncia Errata (score <= 6), 0 = Pronuncia Corretta (score > 6)
+    y_true = (human_scores <= 6).astype(int)
+    
+    # Usa 1 - confidence come probabilità di errore
+    # (bassa confidence → alta probabilità di errore)
+    y_prob = 1 - confidence_scores
+    
+    # Threshold per classificazione
+    threshold = 0.5
+    y_pred = (y_prob >= threshold).astype(int)
+    
+    # Metriche
+    try:
+        auc_roc = roc_auc_score(y_true, y_prob)
+    except ValueError:
+        auc_roc = 0.5  # Default se una sola classe presente
+    
+    precision, recall, f1, _ = precision_recall_fscore_support(
+        y_true, y_pred, average='binary', zero_division=0
+    )
+    
+    # Conta distribuzione
+    n_correct = (y_true == 0).sum()
+    n_incorrect = (y_true == 1).sum()
+    
+    print(f"\n   📊 Distribuzione Dataset:")
+    print(f"   ──────────────────────────")
+    print(f"   Pronuncia Corretta (>6):  {n_correct} ({100*n_correct/len(y_true):.1f}%)")
+    print(f"   Pronuncia Errata (≤6):    {n_incorrect} ({100*n_incorrect/len(y_true):.1f}%)")
+    
+    print(f"\n   📊 Metriche di Classificazione:")
+    print(f"   ──────────────────────────────")
+    print(f"   AUC-ROC:   {auc_roc:.4f}")
+    print(f"   Precision: {precision:.4f}")
+    print(f"   Recall:    {recall:.4f}")
+    print(f"   F1-Score:  {f1:.4f}")
+    
+    # Interpretazione AUC
+    if auc_roc >= 0.8:
+        auc_interp = "✅ OTTIMO - classificatore affidabile"
+    elif auc_roc >= 0.7:
+        auc_interp = "⚠️ BUONO - classificatore discreto"
+    elif auc_roc >= 0.6:
+        auc_interp = "⚠️ MODERATO - margine di miglioramento"
+    else:
+        auc_interp = "❌ SCARSO - classificatore poco affidabile"
+    print(f"\n   Interpretazione AUC: {auc_interp}")
+    
+    # Confusion matrix summary
+    tp = ((y_pred == 1) & (y_true == 1)).sum()
+    tn = ((y_pred == 0) & (y_true == 0)).sum()
+    fp = ((y_pred == 1) & (y_true == 0)).sum()
+    fn = ((y_pred == 0) & (y_true == 1)).sum()
+    
+    print(f"\n   📊 Confusion Matrix:")
+    print(f"   ─────────────────────")
+    print(f"                  Predicted")
+    print(f"                Corr.  Err.")
+    print(f"   Actual Corr.  {tn:4d}  {fp:4d}")
+    print(f"   Actual Err.   {fn:4d}  {tp:4d}")
+    
+    # ==========================================================================
+    # RIEPILOGO FINALE
+    # ==========================================================================
+    print("\n" + "=" * 70)
+    print("📈 RIEPILOGO BENCHMARK")
+    print("=" * 70)
+    
+    print(f"""
+   ┌─────────────────────────────────────────────────────────────────┐
+   │ TASK A - ASR Robustness (High Quality)                         │
+   │   PER:      {per_high * 100:6.2f}%                                          │
+   │   Accuracy: {(1 - per_high) * 100:6.2f}%                                          │
+   ├─────────────────────────────────────────────────────────────────┤
+   │ TASK B - Scoring Correlation                                   │
+   │   Pearson:  {pearson_corr:7.4f}                                            │
+   │   Spearman: {spearman_corr:7.4f}                                            │
+   ├─────────────────────────────────────────────────────────────────┤
+   │ TASK C - Mispronunciation Detection                            │
+   │   AUC-ROC:  {auc_roc:7.4f}                                            │
+   │   F1-Score: {f1:7.4f}                                            │
+   └─────────────────────────────────────────────────────────────────┘
+    """)
+    
+    # Esempi (opzionale)
     if verbose:
-        print("\n" + "=" * 60)
+        print("\n" + "=" * 70)
         print("📝 ESEMPI DI PREDIZIONI")
-        print("=" * 60)
+        print("=" * 70)
         
         np.random.seed(42)
-        sample_indices = np.random.choice(len(results), min(10, len(results)), replace=False)
+        sample_indices = np.random.choice(len(all_data), min(5, len(all_data)), replace=False)
         
         for i, idx in enumerate(sample_indices, 1):
-            ex = results[int(idx)]
-            pred_clean = normalizer.normalize(ex['predicted_ipa'])
-            ref_clean = normalizer.normalize(ex['reference_ipa'])
-            
-            print(f"\n--- Esempio {i} (Score: {ex['accuracy']}/10, Età: {ex['age']}) ---")
-            print(f"Testo:      {ex['text']}")
-            print(f"Ref (IPA):  /{ex['reference_ipa']}/")
-            print(f"Ref Clean:  /{ref_clean}/")
-            print(f"Pred:       /{ex['predicted_ipa']}/")
-            print(f"Pred Clean: /{pred_clean}/")
-            
-            if pred_clean and ref_clean:
-                single_per = cer_metric.compute(
-                    predictions=[pred_clean],
-                    references=[ref_clean]
-                )
-                print(f"PER:        {single_per*100:.2f}%")
+            d = all_data[int(idx)]
+            print(f"\n--- Esempio {i} (Score Umano: {d['human_score']}/10) ---")
+            print(f"Testo:      {d['text']}")
+            print(f"Ref (IPA):  /{d['ref']}/")
+            print(f"Pred:       /{d['pred']}/")
+            print(f"PER:        {d['per']*100:.2f}%")
+            print(f"Confidence: {confidence_scores[idx]:.4f}")
     
-    print("\n" + "=" * 60)
-    print("✓ Valutazione completata!")
-    print("=" * 60)
+    print("\n" + "=" * 70)
+    print("✓ Benchmark completato!")
+    print("=" * 70)
     
-    return per
+    return {
+        "per_high_quality": per_high,
+        "pearson": pearson_corr,
+        "spearman": spearman_corr,
+        "auc_roc": auc_roc,
+        "f1": f1,
+    }
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Evaluate on SpeechOcean762")
+    parser = argparse.ArgumentParser(description="Benchmark scientifico su SpeechOcean762")
     parser.add_argument(
         "--model-path",
         type=str,
@@ -254,7 +378,7 @@ def main():
     parser.add_argument(
         "--quiet",
         action="store_true",
-        help="Reduce verbosity"
+        help="Reduce verbosity (no examples)"
     )
     
     args = parser.parse_args()
