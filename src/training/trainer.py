@@ -70,7 +70,7 @@ from .dataset import DataCollatorCTCWithPadding, prepare_dataset_function
 class TrainingConfig:
     """Configurazione training."""
     seed: int = 42
-    model_name: str = "microsoft/wavlm-base-plus"
+    model_name: str = "microsoft/wavlm-large"
     freeze_feature_encoder: bool = True
     
     csv_path: str = "data/processed/phonemeref_processed.csv"

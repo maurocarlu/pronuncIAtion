@@ -7,7 +7,7 @@ seed: 42
 
 # Modello
 model:
-  name: "microsoft/wavlm-base-plus"
+  name: "microsoft/wavlm-large"
   freeze_feature_encoder: true
   ctc_loss_reduction: "mean"
 

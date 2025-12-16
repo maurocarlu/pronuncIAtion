@@ -1,26 +1,35 @@
 # 🎙️ DeepLearning-Phoneme
 
-**Riconoscimento fonetico IPA da audio usando WavLM + CTC**
+**Riconoscimento fonetico IPA da audio con architettura Ensemble (WavLM + XLS-R)**
 
-Sistema di Automatic Phoneme Recognition (APR) che converte audio di parole inglesi nella loro trascrizione fonetica IPA utilizzando il modello WavLM fine-tunato con CTC loss.
+Sistema di Automatic Phoneme Recognition (APR) e Pronunciation Scoring per speaker non-nativi, basato su ensemble di modelli WavLM e XLS-R con Late Fusion.
 
 ## 📋 Indice
 
+- [Features](#features)
 - [Requisiti](#requisiti)
 - [Installazione](#installazione)
 - [Quick Start](#quick-start)
-- [Workflow Completo](#workflow-completo)
+- [Workflow](#workflow)
 - [Struttura Progetto](#struttura-progetto)
-- [Comandi](#comandi)
-- [Configurazione](#configurazione)
-- [Risultati](#risultati)
+- [Benchmark](#benchmark)
+- [Ensemble Architecture](#ensemble-architecture)
+- [Colab Training](#colab-training)
+
+## ✨ Features
+
+- **Riconoscimento fonemi IPA** da audio inglese
+- **Ensemble SOTA** con WavLM + XLS-R e Late Fusion
+- **Weighted Layer Sum** per combinazione ottimale dei layer
+- **Benchmark scientifico** su SpeechOcean762 (speaker non-nativi)
+- **3 Task di valutazione**: ASR Robustness, Scoring Correlation, Mispronunciation Detection
 
 ## Requisiti
 
 - Python 3.9+
 - CUDA 11.8+ (opzionale, per GPU)
-- ~10GB spazio disco per dataset completo
-- ~4GB VRAM GPU (consigliato)
+- ~10GB spazio disco per dataset
+- ~8GB VRAM (WavLM) / ~12GB VRAM (XLS-R)
 
 ## Installazione
 
@@ -40,199 +49,158 @@ pip install -r requirements.txt
 
 ## Quick Start
 
-Se hai già il modello trainato:
-
 ```bash
-# Inferenza su un file audio
-python -m scripts.04_evaluate --model-path outputs/wavlm-phoneme-recognizer/final_model --audio path/to/audio.mp3
+# Valutazione modello su SpeechOcean762
+python scripts/05_evaluate_speechocean.py --model-path outputs/final_model
 
-# Modalità interattiva
-python -m scripts.04_evaluate --model-path outputs/wavlm-phoneme-recognizer/final_model --interactive
+# Inferenza su file audio
+python scripts/04_evaluate.py --model-path outputs/final_model --audio audio.mp3
 ```
 
-## Workflow Completo
+## Workflow
 
-### Fase 1: Preparazione Dati
+### 1. Preparazione Dati
 
 ```bash
-# 1.1 Costruisci il dataset CSV dai file scaricati
-python -m scripts.01_build_dataset \
-    --data-dir data/raw/phonemeref_data \
-    --output data/processed/phonemeref_metadata.csv
+# Costruisci dataset da WordReference
+python scripts/01_build_dataset.py --data-dir data/raw/phonemeref_data
 
-# 1.2 Preprocessa e crea vocabolario IPA
-python -m scripts.02_preprocess \
-    --input data/processed/phonemeref_metadata.csv \
-    --output-csv data/processed/phonemeref_processed.csv \
-    --output-vocab data/processed/vocab.json
+# Preprocessa e crea vocabolario IPA
+python scripts/02_preprocess.py
+
+# Aggiungi SpeechOcean e augmentation
+python scripts/build_combined_dataset.py --min-score 8
 ```
 
-### Fase 2: Training
+### 2. Training
 
 ```bash
-# Training completo (~10 ore su CPU, ~2 ore su GPU)
-python -m scripts.03_train --config configs/training_config.yaml
+# Training WavLM standard
+python scripts/03_train.py --config configs/training_config.yaml
 
-# Training debug (1 epoca, batch piccolo)
-python -m scripts.03_train --config configs/training_config.yaml --debug
+# Training WavLM Weighted (Ensemble Model A)
+python scripts/train_weighted.py --config configs/training_config.yaml
 
-# Riprendi da checkpoint
-python -m scripts.03_train --config configs/training_config.yaml --resume
+# Training XLS-R (Ensemble Model B)
+python scripts/train_xlsr.py --config configs/training_config.yaml
 ```
 
-### Fase 3: Valutazione
+### 3. Valutazione
 
 ```bash
-# Valuta sul test set interno
-python -m scripts.04_evaluate \
-    --model-path outputs/wavlm-phoneme-recognizer/final_model \
-    --test-csv data/processed/phonemeref_processed.csv
+# Benchmark su SpeechOcean762 (3 task)
+python scripts/05_evaluate_speechocean.py --model-path outputs/final_model
 
-# Valuta su SpeechOcean762 (speaker non-nativi)
-python -m scripts.05_evaluate_speechocean \
-    --model-path outputs/wavlm-phoneme-recognizer/final_model
+# Late Fusion Ensemble
+python scripts/evaluate_fusion.py \
+    --model-a outputs/wavlm_weighted \
+    --model-b outputs/xlsr \
+    --weight 0.6
 ```
 
 ## Struttura Progetto
 
 ```
 DeepLearning-Phoneme/
-├── configs/                    # File di configurazione
-│   └── training_config.yaml    # Config training principale
+├── configs/                    # Configurazioni YAML
+│   └── training_config.yaml
 ├── data/
-│   ├── raw/                    # Dati grezzi
-│   │   └── phonemeref_data/    # Audio + JSON scaricati
-│   ├── processed/              # Dati processati
-│   │   ├── phonemeref_metadata.csv
-│   │   ├── phonemeref_processed.csv
-│   │   └── vocab.json
-│   └── wordlists/              # Liste parole sorgente
+│   ├── raw/                    # Audio + JSON scaricati
+│   ├── processed/              # CSV processati
+│   │   ├── combined_augmented.csv  # Dataset principale
+│   │   └── vocab.json              # Vocabolario IPA
+│   └── speechocean/            # Audio SpeechOcean
 ├── outputs/                    # Modelli salvati
-│   └── wavlm-phoneme-recognizer/
-│       ├── checkpoint-*/
-│       └── final_model/
 ├── scripts/                    # Script eseguibili
-│   ├── 01_build_dataset.py
-│   ├── 02_preprocess.py
-│   ├── 03_train.py
-│   ├── 04_evaluate.py
-│   └── 05_evaluate_speechocean.py
+│   ├── 01_build_dataset.py     # Costruzione dataset
+│   ├── 02_preprocess.py        # Preprocessing IPA
+│   ├── 03_train.py             # Training standard
+│   ├── 04_evaluate.py          # Valutazione interna
+│   ├── 05_evaluate_speechocean.py  # Benchmark SpeechOcean
+│   ├── train_weighted.py       # Training WavLM Weighted
+│   ├── train_xlsr.py           # Training XLS-R
+│   └── evaluate_fusion.py      # Late Fusion eval
 ├── src/                        # Moduli Python
-│   ├── data/                   # Gestione dati
-│   │   └── preprocessor.py
-│   ├── training/               # Training
-│   │   ├── dataset.py
-│   │   └── trainer.py
+│   ├── data/                   # Gestione dati e IPA
+│   ├── training/               # Training loop
 │   └── inference/              # Inferenza
-│       └── predictor.py
 ├── tests/                      # Unit tests
-├── Makefile                    # Comandi make
-├── requirements.txt            # Dipendenze Python
+├── colab_train_augmented.ipynb     # Notebook Colab
+├── colab_train_wavlm_weighted.ipynb
+├── colab_train_xlsr.ipynb
+├── ENSEMBLE_GUIDE.md           # Guida Ensemble
 └── README.md
 ```
 
-## Comandi
+## Benchmark
 
-### Con Make (Linux/Mac/WSL)
+### SpeechOcean762 (Speaker Non-Nativi)
 
-| Comando | Descrizione |
-|---------|-------------|
-| `make install` | Installa dipendenze |
-| `make build-dataset` | Crea CSV metadata |
-| `make preprocess` | Preprocessa e crea vocab |
-| `make train` | Avvia training |
-| `make train-debug` | Training debug (1 epoca) |
-| `make evaluate` | Valuta su test set |
-| `make evaluate-so` | Valuta su SpeechOcean762 |
-| `make inference AUDIO=file.mp3` | Inferenza su file |
-| `make clean` | Pulisce file temporanei |
+Il benchmark valuta 3 task su 2500 samples con punteggi umani (1-10):
 
-### Con PowerShell (Windows)
+| Task | Metrica | Valore |
+|------|---------|--------
+| **A - ASR Robustness** | PER (score ≥8) | ~15% |
+| **B - Scoring Correlation** | Spearman ρ | ~0.51 |
+| **C - Mispronunciation Detection** | AUC-ROC | ~0.84 |
 
-```powershell
-# Build dataset
-python -m scripts.01_build_dataset
+### Interpretazione
 
-# Preprocess
-python -m scripts.02_preprocess
+- **TASK A**: Il modello trascrive correttamente pronunce di alta qualità
+- **TASK B**: Correlazione significativa tra PER e giudizio umano
+- **TASK C**: Il modello può identificare pronunce errate (AUC > 0.8)
 
-# Train
-python -m scripts.03_train --config configs/training_config.yaml
+## Ensemble Architecture
 
-# Evaluate
-python -m scripts.04_evaluate
-
-# Evaluate SpeechOcean
-python -m scripts.05_evaluate_speechocean
-```
-
-## Configurazione
-
-Modifica `configs/training_config.yaml`:
-
-```yaml
-model:
-  name: "microsoft/wavlm-base-plus"
-  freeze_feature_encoder: true
-
-training:
-  num_train_epochs: 10
-  per_device_train_batch_size: 8
-  learning_rate: 1e-4
-  warmup_steps: 200
-  fp16: true  # Disabilita se non hai GPU
-
-data:
-  test_size: 0.1
-  sampling_rate: 16000
-```
-
-## Risultati
-
-### Test Set Interno (PhonemeRef)
-
-| Metrica | Valore |
-|---------|--------|
-| **PER** | 5.52% |
-| **Accuratezza** | 94.48% |
-
-### SpeechOcean762 (Non-Native Speakers)
-
-| Qualità Pronuncia | PER |
-|-------------------|-----|
-| Alta (8-10) | ~15-20% |
-| Media (5-7) | ~25-35% |
-| Bassa (1-4) | ~40-50% |
-
-## Architettura
+L'architettura Ensemble combina due modelli per migliorare robustezza:
 
 ```
-Audio (16kHz) → WavLM Feature Encoder → Transformer → CTC Head → Fonemi IPA
-                    (frozen)              (trainable)   (trainable)
+Audio → WavLM (Weighted Layers) → logits_A ─┐
+                                            ├─→ Late Fusion → Prediction
+Audio → XLS-R (Multilingual)    → logits_B ─┘
+
+Fusion: final = w * logits_A + (1-w) * logits_B
 ```
 
-- **Modello base**: microsoft/wavlm-base-plus
-- **Loss**: CTC (Connectionist Temporal Classification)
-- **Vocabolario**: ~50 simboli IPA
+### Componenti
 
-## Metrica
+| Modello | Caratteristica | Forza |
+|---------|---------------|-------|
+| **WavLM Weighted** | Somma pesata 12 layer | Info acustiche + fonetiche |
+| **XLS-R 300M** | Pre-training 128 lingue | Varietà accenti |
 
-Il modello viene valutato usando **PER** (Phoneme Error Rate):
+📚 Vedi [ENSEMBLE_GUIDE.md](ENSEMBLE_GUIDE.md) per dettagli tecnici.
 
-$$PER = \frac{S + D + I}{N}$$
+## Colab Training
 
-Dove:
-- S = Sostituzioni
-- D = Cancellazioni
-- I = Inserimenti
-- N = Numero totale fonemi reference
+Per training su Google Colab con GPU gratuita:
+
+1. Carica `phonemeRef.zip` su Google Drive
+2. Apri uno dei notebook:
+   - `colab_train_augmented.ipynb` - Training standard
+   - `colab_train_wavlm_weighted.ipynb` - WavLM Weighted
+   - `colab_train_xlsr.ipynb` - XLS-R + Late Fusion
+
+## Dataset
+
+### Fonti
+
+- **WordReference**: ~15k parole inglesi con IPA
+- **SpeechOcean762**: 2500 samples speaker non-nativi (train: score≥8)
+
+### Pipeline
+
+```
+WordReference (15k) ─┬─→ Augmentation ─→ combined_augmented.csv
+SpeechOcean (≥8)   ──┘                   (~40k samples)
+```
 
 ## Riferimenti
 
 - [WavLM Paper](https://arxiv.org/abs/2110.13900)
-- [HuggingFace Transformers](https://huggingface.co/docs/transformers)
-- [IPA Chart](https://www.internationalphoneticassociation.org/content/ipa-chart)
+- [XLS-R Paper](https://arxiv.org/abs/2111.09296)
 - [SpeechOcean762](https://arxiv.org/abs/2104.01378)
+- [Weighted Layer Sum](https://arxiv.org/abs/2111.00346)
 
 ## Licenza
 
@@ -240,5 +208,4 @@ MIT License
 
 ## Autori
 
-- Progetto universitario - Deep Learning, Magistrale Anno 2
-
+Progetto universitario - Deep Learning, Magistrale Anno 2
