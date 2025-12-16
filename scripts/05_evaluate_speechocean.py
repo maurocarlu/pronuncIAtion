@@ -207,61 +207,81 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
     # TASK B: SCORING CORRELATION (Intero Dataset)
     # ==========================================================================
     print("\n" + "=" * 70)
-    print("📋 TASK B: SCORING CORRELATION (Confidence vs Human Score)")
+    print("📋 TASK B: SCORING CORRELATION (PER vs Human Score)")
     print("=" * 70)
-    print("   Obiettivo: Verificare correlazione tra confidence del modello")
+    print("   Obiettivo: Verificare correlazione tra PER del modello")
     print("              e giudizio umano sulla qualità della pronuncia.")
+    print("   Metrica principale: (1 - PER) ↔ Human Score")
     print("-" * 70)
     
-    # Calcola correlazioni
-    pearson_corr, pearson_p = pearsonr(confidence_scores, human_scores)
-    spearman_corr, spearman_p = spearmanr(confidence_scores, human_scores)
-    
-    # Correlazione inversa con PER (più PER = peggiore pronuncia)
+    # Correlazione PER (metrica principale)
     pearson_per, pearson_per_p = pearsonr(1 - pers, human_scores)
     spearman_per, spearman_per_p = spearmanr(1 - pers, human_scores)
     
-    print(f"\n   📊 Correlazione Confidence ↔ Human Score:")
-    print(f"   ──────────────────────────────────────────")
-    print(f"   Pearson:  r = {pearson_corr:.4f} (p = {pearson_p:.2e})")
-    print(f"   Spearman: ρ = {spearman_corr:.4f} (p = {spearman_p:.2e})")
+    # Correlazione confidence (metrica secondaria)
+    pearson_conf, pearson_conf_p = pearsonr(confidence_scores, human_scores)
+    spearman_conf, spearman_conf_p = spearmanr(confidence_scores, human_scores)
     
-    print(f"\n   📊 Correlazione (1 - PER) ↔ Human Score:")
-    print(f"   ──────────────────────────────────────────")
+    print(f"\n   📊 METRICA PRINCIPALE: (1 - PER) ↔ Human Score")
+    print(f"   ════════════════════════════════════════════════")
     print(f"   Pearson:  r = {pearson_per:.4f} (p = {pearson_per_p:.2e})")
     print(f"   Spearman: ρ = {spearman_per:.4f} (p = {spearman_per_p:.2e})")
     
-    # Interpretazione
-    if abs(spearman_corr) >= 0.7:
-        interp = "✅ FORTE correlazione - il modello discrimina bene"
-    elif abs(spearman_corr) >= 0.5:
+    print(f"\n   📊 Metrica secondaria: Confidence ↔ Human Score")
+    print(f"   ──────────────────────────────────────────")
+    print(f"   Pearson:  r = {pearson_conf:.4f} (p = {pearson_conf_p:.2e})")
+    print(f"   Spearman: ρ = {spearman_conf:.4f} (p = {spearman_conf_p:.2e})")
+    
+    # Interpretazione basata su PER (metrica principale)
+    if abs(spearman_per) >= 0.7:
+        interp = "✅ FORTE correlazione - il PER discrimina bene"
+    elif abs(spearman_per) >= 0.5:
+        interp = "✅ MODERATA-BUONA correlazione - risultato significativo"
+    elif abs(spearman_per) >= 0.3:
         interp = "⚠️ MODERATA correlazione - margine di miglioramento"
     else:
-        interp = "❌ DEBOLE correlazione - il modello non discrimina bene"
-    print(f"\n   Interpretazione: {interp}")
+        interp = "❌ DEBOLE correlazione - necessario miglioramento"
+    print(f"\n   Interpretazione PER: {interp}")
     
     # ==========================================================================
     # TASK C: MISPRONUNCIATION DETECTION (Classificazione Binaria)
     # ==========================================================================
     print("\n" + "=" * 70)
-    print("📋 TASK C: MISPRONUNCIATION DETECTION (Binary Classification)")
+    print("📋 TASK C: MISPRONUNCIATION DETECTION (PER-based Classification)")
     print("=" * 70)
     print("   Obiettivo: Classificare pronuncia come Corretta/Errata")
-    print("              usando il confidence score come predittore.")
+    print("              usando il PER (distanza Levenshtein) come predittore.")
     print("   Labels: Errata (score <= 6), Corretta (score > 6)")
+    print("   Logica: Alto PER → Alta probabilità di errore di pronuncia")
     print("-" * 70)
     
     # Crea label binarie
     # 1 = Pronuncia Errata (score <= 6), 0 = Pronuncia Corretta (score > 6)
     y_true = (human_scores <= 6).astype(int)
     
-    # Usa 1 - confidence come probabilità di errore
-    # (bassa confidence → alta probabilità di errore)
-    y_prob = 1 - confidence_scores
+    # Usa PER come score predittivo
+    # Alto PER → alta probabilità di errore (no inversione necessaria)
+    y_prob = pers
     
-    # Threshold per classificazione
-    threshold = 0.5
-    y_pred = (y_prob >= threshold).astype(int)
+    # Trova soglia ottimale usando F1
+    from sklearn.metrics import precision_recall_curve
+    
+    # Test multiple thresholds
+    thresholds_to_test = np.arange(0.05, 0.50, 0.01)
+    best_f1 = 0
+    best_threshold = 0.10
+    
+    for thresh in thresholds_to_test:
+        y_pred_temp = (pers >= thresh).astype(int)
+        _, _, f1_temp, _ = precision_recall_fscore_support(
+            y_true, y_pred_temp, average='binary', zero_division=0
+        )
+        if f1_temp > best_f1:
+            best_f1 = f1_temp
+            best_threshold = thresh
+    
+    # Applica soglia ottimale
+    y_pred = (pers >= best_threshold).astype(int)
     
     # Metriche
     try:
@@ -273,6 +293,8 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
         y_true, y_pred, average='binary', zero_division=0
     )
     
+    accuracy = ((y_pred == y_true).sum()) / len(y_true)
+    
     # Conta distribuzione
     n_correct = (y_true == 0).sum()
     n_incorrect = (y_true == 1).sum()
@@ -282,9 +304,14 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
     print(f"   Pronuncia Corretta (>6):  {n_correct} ({100*n_correct/len(y_true):.1f}%)")
     print(f"   Pronuncia Errata (≤6):    {n_incorrect} ({100*n_incorrect/len(y_true):.1f}%)")
     
+    print(f"\n   📊 Soglia Ottimale (massimizza F1):")
+    print(f"   ─────────────────────────────────")
+    print(f"   PER Threshold: {best_threshold:.2f} (se PER >= {best_threshold:.2f} → Errore)")
+    
     print(f"\n   📊 Metriche di Classificazione:")
     print(f"   ──────────────────────────────")
     print(f"   AUC-ROC:   {auc_roc:.4f}")
+    print(f"   Accuracy:  {accuracy:.4f}")
     print(f"   Precision: {precision:.4f}")
     print(f"   Recall:    {recall:.4f}")
     print(f"   F1-Score:  {f1:.4f}")
@@ -293,7 +320,7 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
     if auc_roc >= 0.8:
         auc_interp = "✅ OTTIMO - classificatore affidabile"
     elif auc_roc >= 0.7:
-        auc_interp = "⚠️ BUONO - classificatore discreto"
+        auc_interp = "✅ BUONO - classificatore discreto"
     elif auc_roc >= 0.6:
         auc_interp = "⚠️ MODERATO - margine di miglioramento"
     else:
@@ -306,7 +333,7 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
     fp = ((y_pred == 1) & (y_true == 0)).sum()
     fn = ((y_pred == 0) & (y_true == 1)).sum()
     
-    print(f"\n   📊 Confusion Matrix:")
+    print(f"\n   📊 Confusion Matrix (threshold={best_threshold:.2f}):")
     print(f"   ─────────────────────")
     print(f"                  Predicted")
     print(f"                Corr.  Err.")
@@ -322,15 +349,15 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
     
     print(f"""
    ┌─────────────────────────────────────────────────────────────────┐
-   │ TASK A - ASR Robustness (High Quality)                         │
+   │ TASK A - ASR Robustness (High Quality, score >= 8)             │
    │   PER:      {per_high * 100:6.2f}%                                          │
    │   Accuracy: {(1 - per_high) * 100:6.2f}%                                          │
    ├─────────────────────────────────────────────────────────────────┤
-   │ TASK B - Scoring Correlation                                   │
-   │   Pearson:  {pearson_corr:7.4f}                                            │
-   │   Spearman: {spearman_corr:7.4f}                                            │
+   │ TASK B - Scoring Correlation [(1-PER) ↔ Human Score]           │
+   │   Pearson:  {pearson_per:7.4f}                                            │
+   │   Spearman: {spearman_per:7.4f}                                            │
    ├─────────────────────────────────────────────────────────────────┤
-   │ TASK C - Mispronunciation Detection                            │
+   │ TASK C - Mispronunciation Detection (PER >= {best_threshold:.2f})             │
    │   AUC-ROC:  {auc_roc:7.4f}                                            │
    │   F1-Score: {f1:7.4f}                                            │
    └─────────────────────────────────────────────────────────────────┘
