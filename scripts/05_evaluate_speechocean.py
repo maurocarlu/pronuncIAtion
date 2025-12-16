@@ -387,10 +387,11 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
     
     return {
         "per_high_quality": per_high,
-        "pearson": pearson_corr,
-        "spearman": spearman_corr,
+        "pearson": pearson_per,
+        "spearman": spearman_per,
         "auc_roc": auc_roc,
         "f1": f1,
+        "best_threshold": best_threshold,
     }
 
 
