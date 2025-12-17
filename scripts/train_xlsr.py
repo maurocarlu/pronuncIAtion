@@ -277,6 +277,36 @@ class XLSRTrainer:
         # Carica CSV
         ds = load_dataset("csv", data_files=csv_path)["train"]
         
+        # ---------------------------------------------------------------------
+        # FIX PATHS: Converti Windows paths a Unix e filtra file mancanti
+        # Questo è necessario quando il dataset è stato creato su Windows
+        # ma il training avviene su Linux/Colab
+        # ---------------------------------------------------------------------
+        def fix_audio_path(example):
+            """Converte path Windows in path Unix."""
+            path = example["audio_path"]
+            # Converti backslash in forward slash
+            path = path.replace("\\", "/")
+            example["audio_path"] = path
+            return example
+        
+        print("[XLS-R] Fixing audio paths (Windows -> Unix)...")
+        ds = ds.map(fix_audio_path, num_proc=1)
+        
+        # Filtra file che non esistono
+        def file_exists(example):
+            path = example["audio_path"]
+            return Path(path).exists()
+        
+        initial_count = len(ds)
+        print("[XLS-R] Filtering missing audio files...")
+        ds = ds.filter(file_exists, num_proc=1)
+        final_count = len(ds)
+        
+        if final_count < initial_count:
+            print(f"[XLS-R] ⚠️ Rimossi {initial_count - final_count} file mancanti")
+            print(f"[XLS-R] Dataset finale: {final_count} samples")
+        
         # Carica audio a 16kHz
         ds = ds.cast_column(
             "audio_path",
@@ -342,7 +372,7 @@ class XLSRTrainer:
         
         return dataset
     
-    def train(self, dataset) -> None:
+    def train(self, dataset, resume: bool = False) -> None:
         """
         Avvia training XLS-R.
         
@@ -352,6 +382,7 @@ class XLSRTrainer:
         
         Args:
             dataset: DatasetDict preprocessato
+            resume: Se True, riprende dall'ultimo checkpoint
         """
         training_config = self.config["training"]
         
@@ -410,9 +441,12 @@ class XLSRTrainer:
             greater_is_better=False,
             logging_steps=100,
             dataloader_num_workers=0,
-            group_by_length=True,
+            # group_by_length non funziona con input_values (audio)
+            group_by_length=False,
             # XLS-R specifico: gradient checkpointing per risparmiare VRAM
             gradient_checkpointing=True,
+            # Disabilita wandb/tensorboard
+            report_to="none",
         )
         
         # Data collator
@@ -429,8 +463,24 @@ class XLSRTrainer:
         )
         
         print(f"[XLS-R] Output dir: {output_dir}")
+        
+        # Trova checkpoint per resume
+        resume_from_checkpoint = None
+        if resume:
+            output_path = Path(output_dir)
+            if output_path.exists():
+                checkpoints = sorted([
+                    d for d in output_path.iterdir() 
+                    if d.is_dir() and d.name.startswith("checkpoint-")
+                ])
+                if checkpoints:
+                    resume_from_checkpoint = str(checkpoints[-1])
+                    print(f"[XLS-R] Ripresa da checkpoint: {resume_from_checkpoint}")
+                else:
+                    print("[XLS-R] Nessun checkpoint trovato, training da zero")
+        
         print("[XLS-R] Avvio training...")
-        self.trainer.train()
+        self.trainer.train(resume_from_checkpoint=resume_from_checkpoint)
         
         # Salva modello finale
         final_path = Path(output_dir) / "final_model_xlsr"
@@ -465,6 +515,11 @@ def main():
         default=None,
         help="Override output directory"
     )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume training from last checkpoint"
+    )
     
     args = parser.parse_args()
     
@@ -484,13 +539,14 @@ def main():
     
     print(f"Config: {args.config}")
     print(f"Dataset: {config['data']['csv_path']}")
+    print(f"Resume: {args.resume}")
     
     # Training
     trainer = XLSRTrainer(config)
     trainer.setup_processor()
     trainer.setup_model()
     dataset = trainer.load_and_prepare_dataset(config["data"]["csv_path"])
-    trainer.train(dataset)
+    trainer.train(dataset, resume=args.resume)
     
     print("\n" + "=" * 60)
     print("✓ Training XLS-R completato!")

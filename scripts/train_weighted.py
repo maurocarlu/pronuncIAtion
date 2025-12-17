@@ -233,10 +233,16 @@ class WavLMWithWeightedLayers(nn.Module):
         Args:
             logits: Output del modello [batch, time, vocab]
             labels: Target labels [batch, label_len], -100 per padding
-            attention_mask: Maschera input [batch, time]
+            attention_mask: Maschera input [batch, time] (audio raw)
             
         Returns:
             CTC loss scalare
+            
+        NOTA IMPORTANTE:
+            attention_mask si riferisce all'audio raw (es. 10000 samples)
+            ma logits ha una dimensione temporale ridotta (es. 58 frames)
+            perché il CNN encoder riduce di ~320x.
+            Quindi usiamo logits.size(1) per input_lengths.
         """
         # Log-softmax per CTC
         log_probs = F.log_softmax(logits, dim=-1)
@@ -244,13 +250,15 @@ class WavLMWithWeightedLayers(nn.Module):
         # Transpose per CTC: [time, batch, vocab]
         log_probs = log_probs.transpose(0, 1)
         
-        # Calcola lunghezze input
-        if attention_mask is not None:
-            input_lengths = attention_mask.sum(dim=-1)
-        else:
-            input_lengths = torch.full(
-                (logits.size(0),), logits.size(1), dtype=torch.long
-            )
+        # Calcola lunghezze input basate sulla dimensione dei LOGITS
+        # NON dell'attention_mask (che è per l'audio raw)
+        batch_size = logits.size(0)
+        seq_len = logits.size(1)  # Lunghezza dopo CNN encoder
+        
+        # Usa la lunghezza della sequenza di output (logits)
+        input_lengths = torch.full(
+            (batch_size,), seq_len, dtype=torch.long, device=logits.device
+        )
         
         # Calcola lunghezze label (ignora -100)
         labels_mask = labels >= 0
@@ -454,6 +462,36 @@ class WeightedWavLMTrainer:
         # Carica CSV
         ds = load_dataset("csv", data_files=csv_path)["train"]
         
+        # ---------------------------------------------------------------------
+        # FIX PATHS: Converti Windows paths a Unix e filtra file mancanti
+        # Questo è necessario quando il dataset è stato creato su Windows
+        # ma il training avviene su Linux/Colab
+        # ---------------------------------------------------------------------
+        def fix_audio_path(example):
+            """Converte path Windows in path Unix e verifica esistenza."""
+            path = example["audio_path"]
+            # Converti backslash in forward slash
+            path = path.replace("\\", "/")
+            example["audio_path"] = path
+            return example
+        
+        print("[Trainer] Fixing audio paths (Windows -> Unix)...")
+        ds = ds.map(fix_audio_path, num_proc=1)
+        
+        # Filtra file che non esistono
+        def file_exists(example):
+            path = example["audio_path"]
+            return Path(path).exists()
+        
+        initial_count = len(ds)
+        print("[Trainer] Filtering missing audio files...")
+        ds = ds.filter(file_exists, num_proc=1)
+        final_count = len(ds)
+        
+        if final_count < initial_count:
+            print(f"[Trainer] ⚠️ Rimossi {initial_count - final_count} file mancanti")
+            print(f"[Trainer] Dataset finale: {final_count} samples")
+        
         # Carica audio
         ds = ds.cast_column(
             "audio_path",
@@ -514,12 +552,13 @@ class WeightedWavLMTrainer:
         
         return dataset
     
-    def train(self, dataset) -> None:
+    def train(self, dataset, resume: bool = False) -> None:
         """
         Avvia training.
         
         Args:
             dataset: DatasetDict preprocessato
+            resume: Se True, riprende dall'ultimo checkpoint
         """
         training_config = self.config["training"]
         output_dir = training_config["output_dir"]
@@ -561,7 +600,11 @@ class WeightedWavLMTrainer:
             greater_is_better=False,
             logging_steps=100,
             dataloader_num_workers=0,
-            group_by_length=training_config.get("group_by_length", True),
+            # group_by_length non funziona con input_values (audio)
+            # richiede input_ids o length_column_name esplicito
+            group_by_length=False,
+            # Disabilita wandb/tensorboard per evitare prompt di login
+            report_to="none",
         )
         
         # Data collator
@@ -577,14 +620,49 @@ class WeightedWavLMTrainer:
             data_collator=data_collator,
         )
         
+        # Trova checkpoint per resume
+        resume_from_checkpoint = None
+        if resume:
+            output_path = Path(output_dir)
+            if output_path.exists():
+                checkpoints = sorted([
+                    d for d in output_path.iterdir() 
+                    if d.is_dir() and d.name.startswith("checkpoint-")
+                ])
+                if checkpoints:
+                    resume_from_checkpoint = str(checkpoints[-1])
+                    print(f"[Trainer] Ripresa da checkpoint: {resume_from_checkpoint}")
+                else:
+                    print("[Trainer] Nessun checkpoint trovato, training da zero")
+        
         print("[Trainer] Avvio training...")
-        self.trainer.train()
+        self.trainer.train(resume_from_checkpoint=resume_from_checkpoint)
         
         # Salva modello finale
         final_path = Path(output_dir) / "final_model_weighted"
-        self.model.save_pretrained(final_path)
+        final_path.mkdir(parents=True, exist_ok=True)
+        
+        # WavLMWithWeightedLayers è un nn.Module custom, usa torch.save
+        model_file = final_path / "pytorch_model.bin"
+        torch.save(self.model.state_dict(), model_file)
+        print(f"[Trainer] Modello salvato: {model_file}")
+        
+        # Salva anche config per ricostruire il modello
+        config_file = final_path / "config.json"
+        import json
+        config_data = {
+            "model_type": "wavlm_weighted_layers",
+            "base_model": "microsoft/wavlm-large",
+            "vocab_size": self.model.lm_head.out_features,
+            "num_layers": self.model.num_layers,
+            "hidden_size": self.model.wavlm.config.hidden_size,
+        }
+        with open(config_file, "w") as f:
+            json.dump(config_data, f, indent=2)
+        
+        # Salva processor
         self.processor.save_pretrained(final_path)
-        print(f"[Trainer] Modello salvato: {final_path}")
+        print(f"[Trainer] Processor salvato: {final_path}")
         
         # Log layer weights finali
         print("\n[Trainer] Layer weights finali:")
@@ -619,6 +697,11 @@ def main():
         default=None,
         help="Override output directory"
     )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume training from last checkpoint"
+    )
     
     args = parser.parse_args()
     
@@ -639,13 +722,14 @@ def main():
     print(f"Config: {args.config}")
     print(f"Dataset: {config['data']['csv_path']}")
     print(f"Output: {config['training']['output_dir']}")
+    print(f"Resume: {args.resume}")
     
     # Training
     trainer = WeightedWavLMTrainer(config)
     trainer.setup_processor()
     trainer.setup_model()
     dataset = trainer.load_and_prepare_dataset(config["data"]["csv_path"])
-    trainer.train(dataset)
+    trainer.train(dataset, resume=args.resume)
     
     print("\n" + "=" * 60)
     print("✓ Training completato!")

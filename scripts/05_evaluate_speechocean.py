@@ -49,9 +49,12 @@ def extract_phones_from_words(words_list: list) -> str:
 
 def evaluate_speechocean(model_path: str, verbose: bool = True):
     """Valuta modello su SpeechOcean762 con benchmark scientifico completo."""
-    from transformers import Wav2Vec2Processor, WavLMForCTC
+    from transformers import Wav2Vec2Processor, WavLMForCTC, WavLMModel
     from scipy.stats import pearsonr, spearmanr
     from sklearn.metrics import roc_auc_score, precision_recall_fscore_support, classification_report
+    import json
+    import torch
+    import torch.nn as nn
     
     # Inizializza normalizzatore
     normalizer = IPANormalizer(mode='strict')
@@ -66,7 +69,54 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
     # Carica modello
     print("\n📦 Caricamento modello...")
     processor = Wav2Vec2Processor.from_pretrained(model_path)
-    model = WavLMForCTC.from_pretrained(model_path)
+    
+    # Controlla se è un modello custom WavLMWithWeightedLayers
+    config_path = Path(model_path) / "config.json"
+    is_custom_model = False
+    if config_path.exists():
+        with open(config_path) as f:
+            config = json.load(f)
+        is_custom_model = config.get("model_type") == "wavlm_weighted_layers"
+    
+    if is_custom_model:
+        print("   Tipo: WavLMWithWeightedLayers (custom)")
+        # Carica modello custom
+        vocab_size = config["vocab_size"]
+        base_model = config.get("base_model", "microsoft/wavlm-large")
+        
+        # Definisci classe inline (stesso codice di train_weighted.py)
+        class WavLMWithWeightedLayers(nn.Module):
+            def __init__(self, vocab_size, model_name="microsoft/wavlm-large"):
+                super().__init__()
+                self.wavlm = WavLMModel.from_pretrained(model_name, output_hidden_states=True)
+                self.num_layers = self.wavlm.config.num_hidden_layers + 1
+                self.layer_weights = nn.Parameter(torch.zeros(self.num_layers))
+                hidden_size = self.wavlm.config.hidden_size
+                self.dropout = nn.Dropout(0.1)
+                self.lm_head = nn.Linear(hidden_size, vocab_size)
+            
+            def forward(self, input_values, attention_mask=None, **kwargs):
+                outputs = self.wavlm(input_values, attention_mask=attention_mask)
+                hidden_states = outputs.hidden_states
+                weights = torch.softmax(self.layer_weights, dim=0)
+                stacked = torch.stack(hidden_states, dim=0)
+                weights = weights.view(-1, 1, 1, 1)
+                weighted_output = (stacked * weights).sum(dim=0)
+                weighted_output = self.dropout(weighted_output)
+                logits = self.lm_head(weighted_output)
+                return {"logits": logits}
+        
+        model = WavLMWithWeightedLayers(vocab_size, base_model)
+        
+        # Carica pesi
+        model_file = Path(model_path) / "pytorch_model.bin"
+        state_dict = torch.load(model_file, map_location="cpu")
+        model.load_state_dict(state_dict)
+        print(f"   ✓ Pesi caricati da: {model_file}")
+    else:
+        print("   Tipo: WavLMForCTC (standard)")
+        model = WavLMForCTC.from_pretrained(model_path)
+    
     model.eval()
     print("✓ Modello caricato!")
     
