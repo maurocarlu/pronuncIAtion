@@ -280,11 +280,21 @@ def train_whisper_encoder(
     print(f"   Parametri totali: {total_params/1e6:.1f}M")
     print(f"   Parametri trainabili: {trainable_params/1e6:.1f}M")
     
-    # Load dataset
+    # Load dataset with memory optimization
     print(f"\n📥 Caricamento dataset: {csv_path}")
-    ds = load_dataset("csv", data_files=csv_path)["train"]
     
-    # Fix paths
+    # Limit samples on Kaggle to avoid OOM
+    max_samples = None
+    if '/kaggle' in os.getcwd():
+        max_samples = 10000  # Limita su Kaggle
+        print(f"   ⚠️ Kaggle mode: limiting to {max_samples} samples")
+    
+    ds = load_dataset("csv", data_files=csv_path, keep_in_memory=False)["train"]
+    
+    if max_samples:
+        ds = ds.select(range(min(len(ds), max_samples)))
+    
+    # Fix paths (in batches to save memory)
     def fix_audio_path(example):
         path = example["audio_path"].replace("\\", "/")
         if not os.path.isabs(path):
@@ -292,18 +302,22 @@ def train_whisper_encoder(
         example["audio_path"] = path
         return example
     
-    ds = ds.map(fix_audio_path, num_proc=1)
-    ds = ds.filter(lambda x: Path(x["audio_path"]).exists(), num_proc=1)
+    ds = ds.map(fix_audio_path, num_proc=1, keep_in_memory=False)
+    
+    # Filter existing files (memory efficient)
+    valid_indices = []
+    for i, example in enumerate(ds):
+        if Path(example["audio_path"]).exists():
+            valid_indices.append(i)
+    ds = ds.select(valid_indices)
     print(f"   Samples: {len(ds)}")
     
-    # Cast audio
-    ds = ds.cast_column("audio_path", Audio(sampling_rate=16000))
-    ds = ds.rename_column("audio_path", "audio")
-    
-    # Split
+    # Split BEFORE loading audio (saves memory)
     if "split" in ds.column_names:
-        train_ds = ds.filter(lambda x: x["split"] == "train")
-        val_ds = ds.filter(lambda x: x["split"] == "validation")
+        train_indices = [i for i, x in enumerate(ds) if x["split"] == "train"]
+        val_indices = [i for i, x in enumerate(ds) if x["split"] == "validation"]
+        train_ds = ds.select(train_indices)
+        val_ds = ds.select(val_indices)
     else:
         split = ds.train_test_split(test_size=0.1, seed=42)
         train_ds = split["train"]
@@ -311,10 +325,15 @@ def train_whisper_encoder(
     
     print(f"   Train: {len(train_ds)}, Val: {len(val_ds)}")
     
-    # Preprocess - Extract mel spectrograms
+    # Now cast audio column
+    train_ds = train_ds.cast_column("audio_path", Audio(sampling_rate=16000))
+    train_ds = train_ds.rename_column("audio_path", "audio")
+    val_ds = val_ds.cast_column("audio_path", Audio(sampling_rate=16000))
+    val_ds = val_ds.rename_column("audio_path", "audio")
+    
+    # Preprocess - Extract mel spectrograms (on-the-fly to save memory)
     def preprocess(batch):
         audio = batch["audio"]["array"]
-        # Whisper expects 30-second segments, but we pad/truncate
         mel = feature_extractor(
             audio, sampling_rate=16000, return_tensors="np"
         ).input_features[0]
@@ -323,8 +342,18 @@ def train_whisper_encoder(
         return batch
     
     print("\n🔄 Extracting mel spectrograms...")
-    train_ds = train_ds.map(preprocess, remove_columns=train_ds.column_names, num_proc=1)
-    val_ds = val_ds.map(preprocess, remove_columns=val_ds.column_names, num_proc=1)
+    train_ds = train_ds.map(
+        preprocess, 
+        remove_columns=train_ds.column_names, 
+        keep_in_memory=False,
+        writer_batch_size=100
+    )
+    val_ds = val_ds.map(
+        preprocess, 
+        remove_columns=val_ds.column_names, 
+        keep_in_memory=False,
+        writer_batch_size=100
+    )
     
     # Metrics
     cer_metric = evaluate.load("cer")
