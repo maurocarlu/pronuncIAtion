@@ -39,13 +39,71 @@ from transformers import (
     Wav2Vec2FeatureExtractor,
     TrainingArguments,
     Trainer,
+    TrainerCallback,
 )
 from transformers.models.wavlm import WavLMModel
+import shutil
 
 warnings.filterwarnings("ignore")
 
 # Add project root to path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+
+
+# =============================================================================
+# DRIVE BACKUP CALLBACK
+# =============================================================================
+
+class DriveBackupCallback(TrainerCallback):
+    """Copia checkpoint su Drive dopo ogni salvataggio."""
+    
+    def __init__(self, backup_dir: str = None):
+        self.backup_dir = backup_dir
+        if '/content' in os.getcwd() or 'COLAB_GPU' in os.environ:
+            self.env = 'colab'
+            if not backup_dir:
+                self.backup_dir = '/content/drive/MyDrive/phoneme_checkpoints'
+        elif '/kaggle' in os.getcwd():
+            self.env = 'kaggle'
+            if not backup_dir:
+                self.backup_dir = '/kaggle/working/drive_backup'
+        else:
+            self.env = 'local'
+            if not backup_dir:
+                self.backup_dir = None
+    
+    def on_save(self, args, state, control, **kwargs):
+        if not self.backup_dir:
+            return
+        
+        # Skip se output_dir è già su Drive (evita copia su se stesso)
+        if self.env == 'colab' and '/drive/' in str(args.output_dir):
+            return  # Già su Drive, niente da fare
+        
+        checkpoint_dir = Path(args.output_dir) / f"checkpoint-{state.global_step}"
+        if checkpoint_dir.exists():
+            os.makedirs(self.backup_dir, exist_ok=True)
+            model_name = Path(args.output_dir).name
+            backup_path = Path(self.backup_dir) / model_name / checkpoint_dir.name
+            
+            # Evita copia su se stessa
+            if checkpoint_dir.resolve() == backup_path.resolve():
+                return
+            
+            try:
+                if self.env == 'colab':
+                    backup_path.parent.mkdir(parents=True, exist_ok=True)
+                    if backup_path.exists():
+                        shutil.rmtree(backup_path)
+                    shutil.copytree(checkpoint_dir, backup_path)
+                    print(f"\n💾 Checkpoint copiato su Drive: {backup_path}")
+                elif self.env == 'kaggle':
+                    zip_path = Path(self.backup_dir) / f"{model_name}_checkpoint-{state.global_step}"
+                    shutil.make_archive(str(zip_path), 'zip', checkpoint_dir)
+                    print(f"\n💾 Checkpoint compresso: {zip_path}.zip")
+            except Exception as e:
+                print(f"\n⚠️ Backup fallito: {e}")
+
 
 
 # =============================================================================
@@ -610,7 +668,7 @@ class WeightedWavLMTrainer:
         # Data collator
         data_collator = DataCollatorCTCWithPadding(processor=self.processor)
         
-        # Trainer
+        # Trainer con callback per backup su Drive
         self.trainer = Trainer(
             model=self.model,
             args=training_args,
@@ -618,6 +676,7 @@ class WeightedWavLMTrainer:
             eval_dataset=dataset["validation"],
             compute_metrics=compute_metrics,
             data_collator=data_collator,
+            callbacks=[DriveBackupCallback()],
         )
         
         # Trova checkpoint per resume

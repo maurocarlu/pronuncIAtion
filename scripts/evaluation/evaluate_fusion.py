@@ -40,7 +40,7 @@ from sklearn.metrics import roc_auc_score, precision_recall_fscore_support
 warnings.filterwarnings("ignore")
 
 # Add project root to path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src.data.normalize_ipa import (
     IPANormalizer,
@@ -75,7 +75,10 @@ def load_model_and_processor(
         Wav2Vec2Processor,
         Wav2Vec2ForCTC,
         WavLMForCTC,
+        WavLMModel,
     )
+    import torch.nn as nn
+    import json
     
     model_path = Path(model_path)
     
@@ -88,42 +91,85 @@ def load_model_and_processor(
     # DETERMINAZIONE AUTOMATICA TIPO MODELLO
     # Controlla config.json per capire quale classe istanziare
     # ---------------------------------------------------------------------
-    if model_type == "auto":
-        config_path = model_path / "config.json"
-        if config_path.exists():
-            import json
-            with open(config_path) as f:
-                config = json.load(f)
-            
-            # Determina dal nome del modello nel config
-            model_name = config.get("_name_or_path", "")
-            if "xlsr" in model_name.lower() or "xls-r" in model_name.lower():
-                model_type = "xlsr"
-            elif "wavlm" in model_name.lower():
-                model_type = "wavlm"
-            else:
-                model_type = "xlsr"  # Default per wav2vec2
+    config_path = model_path / "config.json"
+    is_custom_weighted = False
+    is_xlsr = False
+    config = {}
+    
+    if config_path.exists():
+        with open(config_path) as f:
+            config = json.load(f)
+        
+        # Controlla se è modello custom WavLMWithWeightedLayers
+        if config.get("model_type") == "wavlm_weighted_layers":
+            is_custom_weighted = True
+        # Controlla se è XLS-R (wav2vec2)
+        elif "wav2vec2" in config.get("architectures", [""])[0].lower():
+            is_xlsr = True
+        elif "xlsr" in str(config.get("_name_or_path", "")).lower():
+            is_xlsr = True
+    
+    # Override da parametro
+    if model_type == "xlsr":
+        is_xlsr = True
+        is_custom_weighted = False
+    elif model_type == "weighted":
+        is_custom_weighted = True
+        is_xlsr = False
     
     # ---------------------------------------------------------------------
     # CARICAMENTO MODELLO
     # ---------------------------------------------------------------------
-    try:
-        if model_type == "xlsr":
-            model = Wav2Vec2ForCTC.from_pretrained(model_path)
-            print(f"[Fusion] Tipo: Wav2Vec2ForCTC (XLS-R)")
-        elif model_type == "weighted":
-            # Custom model - carica manualmente
-            # Per ora fallback a WavLMForCTC
-            model = WavLMForCTC.from_pretrained(model_path)
-            print(f"[Fusion] Tipo: WavLMForCTC (Weighted fallback)")
+    if is_custom_weighted:
+        print(f"[Fusion] Tipo: WavLMWithWeightedLayers (custom)")
+        
+        vocab_size = config.get("vocab_size", 45)
+        base_model = config.get("base_model", "microsoft/wavlm-large")
+        
+        # Definisci classe inline (stesso codice di train_weighted.py)
+        class WavLMWithWeightedLayers(nn.Module):
+            def __init__(self, vocab_size, model_name="microsoft/wavlm-large"):
+                super().__init__()
+                self.wavlm = WavLMModel.from_pretrained(model_name, output_hidden_states=True)
+                self.num_layers = self.wavlm.config.num_hidden_layers + 1
+                self.layer_weights = nn.Parameter(torch.zeros(self.num_layers))
+                hidden_size = self.wavlm.config.hidden_size
+                self.dropout = nn.Dropout(0.1)
+                self.lm_head = nn.Linear(hidden_size, vocab_size)
+            
+            def forward(self, input_values, attention_mask=None, **kwargs):
+                outputs = self.wavlm(input_values, attention_mask=attention_mask)
+                hidden_states = outputs.hidden_states
+                weights = torch.softmax(self.layer_weights, dim=0)
+                stacked = torch.stack(hidden_states, dim=0)
+                weights_view = weights.view(-1, 1, 1, 1)
+                weighted_output = (stacked * weights_view).sum(dim=0)
+                weighted_output = self.dropout(weighted_output)
+                logits = self.lm_head(weighted_output)
+                # Wrap in object-like structure for compatibility
+                class Output:
+                    pass
+                out = Output()
+                out.logits = logits
+                return out
+        
+        model = WavLMWithWeightedLayers(vocab_size, base_model)
+        
+        # Carica pesi
+        model_file = model_path / "pytorch_model.bin"
+        if model_file.exists():
+            state_dict = torch.load(model_file, map_location="cpu")
+            model.load_state_dict(state_dict)
+            print(f"[Fusion] ✓ Pesi caricati da: {model_file}")
         else:
-            model = WavLMForCTC.from_pretrained(model_path)
-            print(f"[Fusion] Tipo: WavLMForCTC (WavLM)")
-    except Exception as e:
-        # Fallback a Wav2Vec2ForCTC
-        print(f"[Fusion] Warning: {e}")
+            raise FileNotFoundError(f"pytorch_model.bin non trovato in {model_path}")
+            
+    elif is_xlsr:
+        print(f"[Fusion] Tipo: Wav2Vec2ForCTC (XLS-R)")
         model = Wav2Vec2ForCTC.from_pretrained(model_path)
-        print(f"[Fusion] Tipo: Wav2Vec2ForCTC (fallback)")
+    else:
+        print(f"[Fusion] Tipo: WavLMForCTC (standard)")
+        model = WavLMForCTC.from_pretrained(model_path)
     
     model.eval()
     

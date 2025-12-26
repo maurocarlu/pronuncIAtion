@@ -11,7 +11,7 @@ import numpy as np
 import evaluate
 from datasets import load_dataset, Audio
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src.inference.predictor import PhonemePredictor
 

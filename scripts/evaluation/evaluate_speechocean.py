@@ -20,8 +20,8 @@ import numpy as np
 import evaluate
 from datasets import load_dataset, Audio
 
-# Aggiungi src al path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Aggiungi project root al path (2 livelli su da scripts/evaluation/)
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 # Importa il modulo di normalizzazione centralizzato
 from src.data.normalize_ipa import (
@@ -66,19 +66,91 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
     print(f"   Modello: {model_path}")
     print(f"   Normalizzazione IPA: {normalizer.mode}")
     
-    # Carica modello
-    print("\n📦 Caricamento modello...")
-    processor = Wav2Vec2Processor.from_pretrained(model_path)
-    
-    # Controlla se è un modello custom WavLMWithWeightedLayers
+    # Controlla tipo modello PRIMA di caricare processor
     config_path = Path(model_path) / "config.json"
-    is_custom_model = False
+    is_weighted_model = False
+    is_baseline_mlp = False
+    is_xlsr_model = False
+    is_hubert_model = False
+    is_speechtokenizer = False
+    is_whisper_encoder = False
+    is_qwen_audio = False
+    config = {}
+    
     if config_path.exists():
         with open(config_path) as f:
             config = json.load(f)
-        is_custom_model = config.get("model_type") == "wavlm_weighted_layers"
+        is_weighted_model = config.get("model_type") == "wavlm_weighted_layers"
+        is_baseline_mlp = config.get("model_type") == "baseline_mlp_ctc"
+        is_speechtokenizer = config.get("model_type") == "speechtokenizer_discrete_ctc"
+        is_whisper_encoder = config.get("model_type") == "whisper_encoder_ctc"
+        is_qwen_audio = config.get("model_type") == "qwen2_audio_ctc"
+        # XLS-R usa architettura wav2vec2
+        is_xlsr_model = "wav2vec2" in config.get("architectures", [""])[0].lower() or \
+                        "xlsr" in str(config.get("_name_or_path", "")).lower()
+        # HuBERT detection
+        is_hubert_model = config.get("model_type") == "hubert" or \
+                          "hubert" in config.get("architectures", [""])[0].lower() or \
+                          "hubert" in str(config.get("_name_or_path", "")).lower()
     
-    if is_custom_model:
+    # Carica modello
+    print("\n📦 Caricamento modello...")
+    
+    # Per modelli custom, usa solo tokenizer (non Wav2Vec2Processor completo)
+    if is_speechtokenizer or is_whisper_encoder or is_qwen_audio:
+        from transformers import Wav2Vec2CTCTokenizer
+        processor = Wav2Vec2CTCTokenizer.from_pretrained(model_path)
+    else:
+        processor = Wav2Vec2Processor.from_pretrained(model_path)
+    
+    if is_baseline_mlp:
+        print("   Tipo: BaselineMLPForCTC (Linear Probe)")
+        # Carica modello Baseline MLP
+        vocab_size = config["vocab_size"]
+        hidden_dim = config.get("hidden_dim", 256)
+        backbone = config.get("backbone", "microsoft/wavlm-base")
+        
+        # Definisci classe inline (stesso codice di train_baseline_mlp.py)
+        # NOTA: usa 'wavlm' come nome attributo per matchare il checkpoint salvato
+        class BaselineMLPForCTC(nn.Module):
+            def __init__(self, vocab_size, hidden_dim=256, backbone_name="microsoft/wavlm-base"):
+                super().__init__()
+                from transformers import WavLMModel
+                self.wavlm = WavLMModel.from_pretrained(backbone_name)
+                # Freeze backbone
+                for param in self.wavlm.parameters():
+                    param.requires_grad = False
+                
+                hidden_size = self.wavlm.config.hidden_size  # 768 per wavlm-base
+                self.mlp = nn.Sequential(
+                    nn.Linear(hidden_size, hidden_dim),
+                    nn.ReLU(),
+                    nn.Dropout(0.1),
+                    nn.Linear(hidden_dim, vocab_size),
+                )
+            
+            def forward(self, input_values, attention_mask=None, labels=None, **kwargs):
+                outputs = self.wavlm(input_values, attention_mask=attention_mask)
+                hidden_states = outputs.last_hidden_state  # [batch, frames, 768]
+                logits = self.mlp(hidden_states)  # [batch, frames, vocab_size]
+                return {"logits": logits}
+        
+        model = BaselineMLPForCTC(vocab_size, hidden_dim, backbone)
+        
+        # Carica pesi (solo MLP, backbone viene scaricato da HF)
+        model_file = Path(model_path) / "pytorch_model.bin"
+        state_dict = torch.load(model_file, map_location="cpu")
+        
+        # Carica solo i pesi MLP (il backbone è già inizializzato da from_pretrained)
+        # Filtra per caricare solo mlp.* keys
+        mlp_state_dict = {k: v for k, v in state_dict.items() if k.startswith("mlp.")}
+        model.mlp.load_state_dict({k.replace("mlp.", ""): v for k, v in mlp_state_dict.items()})
+        
+        print(f"   ✓ Pesi MLP caricati da: {model_file}")
+        print(f"   ✓ Backbone: {backbone} (FROZEN, caricato da HuggingFace)")
+        print(f"   ✓ MLP hidden: {hidden_dim}")
+        
+    elif is_weighted_model:
         print("   Tipo: WavLMWithWeightedLayers (custom)")
         # Carica modello custom
         vocab_size = config["vocab_size"]
@@ -113,6 +185,57 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
         state_dict = torch.load(model_file, map_location="cpu")
         model.load_state_dict(state_dict)
         print(f"   ✓ Pesi caricati da: {model_file}")
+    elif is_xlsr_model:
+        print("   Tipo: Wav2Vec2ForCTC (XLS-R)")
+        from transformers import Wav2Vec2ForCTC
+        model = Wav2Vec2ForCTC.from_pretrained(model_path)
+    elif is_hubert_model:
+        print("   Tipo: HubertForCTC")
+        from transformers import HubertForCTC
+        model = HubertForCTC.from_pretrained(model_path)
+    elif is_speechtokenizer:
+        print("   Tipo: SpeechTokenizer (Discrete)")
+        # SpeechTokenizer usa un classificatore custom
+        vocab_size = config.get("vocab_size", 100)
+        codebook_size = config.get("codebook_size", 1024)
+        embed_dim = config.get("embed_dim", 256)
+        num_heads = config.get("num_heads", 4)
+        num_layers = config.get("num_layers", 2)
+        
+        import torch.nn as nn
+        class DiscreteTokenClassifier(nn.Module):
+            def __init__(self, vocab_size, codebook_size=1024, embed_dim=256, num_heads=4, num_layers=2):
+                super().__init__()
+                self.embedding = nn.Embedding(codebook_size, embed_dim)
+                self.pos_encoding = nn.Parameter(torch.zeros(1, 2048, embed_dim))
+                encoder_layer = nn.TransformerEncoderLayer(d_model=embed_dim, nhead=num_heads, 
+                                                           dim_feedforward=embed_dim*4, batch_first=True)
+                self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+                self.dropout = nn.Dropout(0.1)
+                self.lm_head = nn.Linear(embed_dim, vocab_size)
+            
+            def forward(self, input_ids, **kwargs):
+                x = self.embedding(input_ids) + self.pos_encoding[:, :input_ids.size(1), :]
+                x = self.transformer(x)
+                logits = self.lm_head(self.dropout(x))
+                return {"logits": logits}
+        
+        model = DiscreteTokenClassifier(vocab_size, codebook_size, embed_dim, num_heads, num_layers)
+        model_file = Path(model_path) / "pytorch_model.bin"
+        state_dict = torch.load(model_file, map_location="cpu")
+        model.load_state_dict(state_dict)
+        print(f"   ✓ Classificatore caricato")
+        print("   ⚠️ NOTA: SpeechTokenizer richiede preprocessing audio diverso!")
+        print("   ⚠️ La valutazione potrebbe non essere accurata senza SpeechTokenizer encoder.")
+    elif is_whisper_encoder:
+        print("   Tipo: Whisper Encoder + CTC")
+        print("   ⚠️ Whisper Encoder richiede mel spectrograms - valutazione semplificata")
+        # Fallback: stampa warning e usa placeholder
+        model = None
+    elif is_qwen_audio:
+        print("   Tipo: Qwen2-Audio + CTC")
+        print("   ⚠️ Qwen2-Audio richiede caricamento speciale - valutazione semplificata")
+        model = None
     else:
         print("   Tipo: WavLMForCTC (standard)")
         model = WavLMForCTC.from_pretrained(model_path)
@@ -151,7 +274,12 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
         )
         
         with torch.no_grad():
-            logits = model(inputs.input_values).logits
+            outputs = model(inputs.input_values)
+            # Handle both dict (custom model) and object (standard model)
+            if isinstance(outputs, dict):
+                logits = outputs["logits"]
+            else:
+                logits = outputs.logits
         
         # Predizioni
         predicted_ids = torch.argmax(logits, dim=-1)

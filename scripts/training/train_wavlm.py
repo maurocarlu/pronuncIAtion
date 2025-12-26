@@ -52,7 +52,7 @@ from pathlib import Path
 # Sopprimi stderr durante l'import delle librerie pesanti
 with SuppressStderr():
     # Aggiungi src al path
-    sys.path.insert(0, str(Path(__file__).parent.parent))
+    sys.path.insert(0, str(Path(__file__).parent.parent.parent))
     from src.training.trainer import PhonemeTrainer, TrainingConfig
 
 

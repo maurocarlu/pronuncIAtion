@@ -78,13 +78,13 @@ setup: install
 
 build-dataset:
 	@echo ">>> Costruzione dataset CSV..."
-	$(PYTHON) -m scripts.01_build_dataset \
+	$(PYTHON) scripts/data/build_dataset.py \
 		--data-dir $(DATA_DIR)/raw/phonemeref_data \
 		--output $(DATA_DIR)/processed/phonemeref_metadata.csv
 
 preprocess:
 	@echo ">>> Preprocessing e creazione vocabolario..."
-	$(PYTHON) -m scripts.02_preprocess \
+	$(PYTHON) scripts/data/preprocess.py \
 		--input $(DATA_DIR)/processed/phonemeref_metadata.csv \
 		--output-csv $(DATA_DIR)/processed/phonemeref_processed.csv \
 		--output-vocab $(DATA_DIR)/processed/vocab.json
@@ -98,14 +98,14 @@ data-pipeline: build-dataset preprocess
 
 augment:
 	@echo ">>> Avvio augmentation dataset..."
-	$(PYTHON) -m scripts.build_augmented_dataset \
+	$(PYTHON) scripts/data/build_augmented.py \
 		--input $(DATA_DIR)/processed/phonemeref_processed.csv \
 		--output $(DATA_DIR)/processed/phonemeref_augmented.csv \
 		--output-dir $(DATA_DIR)/augmented
 
 augment-acoustic:
 	@echo ">>> Augmentation solo acustica (no TTS)..."
-	$(PYTHON) -m scripts.build_augmented_dataset \
+	$(PYTHON) scripts/data/build_augmented.py \
 		--input $(DATA_DIR)/processed/phonemeref_processed.csv \
 		--output $(DATA_DIR)/processed/phonemeref_augmented.csv \
 		--output-dir $(DATA_DIR)/augmented \
@@ -113,7 +113,7 @@ augment-acoustic:
 
 train-augmented:
 	@echo ">>> Training su dataset augmentato..."
-	$(PYTHON) scripts/03_train.py \
+	$(PYTHON) scripts/training/train_wavlm.py \
 		--config $(CONFIG) \
 		--data-csv $(DATA_DIR)/processed/phonemeref_augmented.csv
 
@@ -123,19 +123,31 @@ train-augmented:
 
 train:
 	@echo ">>> Avvio training..."
-	$(PYTHON) scripts/03_train.py --config $(CONFIG)
+	$(PYTHON) scripts/training/train_wavlm.py --config $(CONFIG)
 
 train-baseline:
 	@echo ">>> Training baseline (solo dati originali)..."
-	$(PYTHON) scripts/03_train.py --config configs/training_config_baseline.yaml
+	$(PYTHON) scripts/training/train_wavlm.py --config configs/training_config_baseline.yaml
 
 train-debug:
 	@echo ">>> Training in modalita debug..."
-	$(PYTHON) scripts/03_train.py --config $(CONFIG) --debug
+	$(PYTHON) scripts/training/train_wavlm.py --config $(CONFIG) --debug
 
 train-resume:
 	@echo ">>> Ripresa training da checkpoint..."
-	$(PYTHON) scripts/03_train.py --config $(CONFIG) --resume
+	$(PYTHON) scripts/training/train_wavlm.py --config $(CONFIG) --resume
+
+train-weighted:
+	@echo ">>> Training WavLM Weighted Layer Sum..."
+	$(PYTHON) scripts/training/train_weighted.py --data-csv $(DATA_DIR)/processed/combined_augmented.csv
+
+train-hubert:
+	@echo ">>> Training HuBERT Large..."
+	$(PYTHON) scripts/training/train_hubert.py --data-csv $(DATA_DIR)/processed/combined_augmented.csv
+
+train-xlsr:
+	@echo ">>> Training XLS-R..."
+	$(PYTHON) scripts/training/train_xlsr.py --data-csv $(DATA_DIR)/processed/combined_augmented.csv
 
 # ============================================================================
 # EVALUATION & INFERENCE
@@ -143,25 +155,25 @@ train-resume:
 
 evaluate:
 	@echo ">>> Valutazione modello..."
-	$(PYTHON) scripts/04_evaluate.py \
+	$(PYTHON) scripts/evaluation/evaluate_model.py \
 		--model-path $(MODEL_DIR) \
 		--test-csv $(DATA_DIR)/processed/phonemeref_augmented.csv \
 		--audio-base .
 
 evaluate-so:
 	@echo ">>> Valutazione su SpeechOcean762..."
-	$(PYTHON) scripts/05_evaluate_speechocean.py \
+	$(PYTHON) scripts/evaluation/evaluate_speechocean.py \
 		--model-path $(MODEL_DIR)
 
 inference:
 	@echo ">>> Inferenza su $(AUDIO)..."
-	$(PYTHON) scripts/04_evaluate.py \
+	$(PYTHON) scripts/evaluation/evaluate_model.py \
 		--model-path $(MODEL_DIR) \
 		--audio $(AUDIO)
 
 inference-interactive:
 	@echo ">>> Modalita inferenza interattiva..."
-	$(PYTHON) scripts/04_evaluate.py \
+	$(PYTHON) scripts/evaluation/evaluate_model.py \
 		--model-path $(MODEL_DIR) \
 		--interactive
 

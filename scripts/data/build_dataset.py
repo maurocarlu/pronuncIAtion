@@ -11,7 +11,7 @@ from pathlib import Path
 import pandas as pd
 
 # Aggiungi src al path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 
 def build_phonemeref_csv(
