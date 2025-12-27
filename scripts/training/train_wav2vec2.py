@@ -149,7 +149,7 @@ def train_wav2vec2(
     audio_base_path: str = ".",
     epochs: int = 10,
     batch_size: int = 4,
-    learning_rate: float = 3e-5,
+    learning_rate: float = 1e-5,  # LOWERED from 3e-5 to prevent CTC collapse
     resume: bool = False,
 ):
     """Training Wav2Vec2 Large con CTC."""
@@ -189,6 +189,7 @@ def train_wav2vec2(
         "facebook/wav2vec2-large-960h-lv60-self",
         vocab_size=vocab_size,
         ctc_loss_reduction="mean",
+        ctc_zero_infinity=True,  # CRITICAL: prevents NaN on edge cases
         pad_token_id=tokenizer.pad_token_id,
         ignore_mismatched_sizes=True,
     )
@@ -222,10 +223,6 @@ def train_wav2vec2(
     ds = ds.filter(lambda x: Path(x["audio_path"]).exists(), num_proc=1)
     print(f"   Samples: {len(ds)}")
     
-    # Cast audio
-    ds = ds.cast_column("audio_path", Audio(sampling_rate=16000))
-    ds = ds.rename_column("audio_path", "audio")
-    
     # Split
     if "split" in ds.column_names:
         train_ds = ds.filter(lambda x: x["split"] == "train")
@@ -237,18 +234,44 @@ def train_wav2vec2(
     
     print(f"   Train: {len(train_ds)}, Val: {len(val_ds)}")
     
-    # Preprocess
+    # Preprocess with MANUAL audio loading (avoids torchcodec issues on Kaggle)
+    import librosa
+    
     def preprocess(batch):
-        audio = batch["audio"]["array"]
-        batch["input_values"] = processor(
+        # Load audio manually with librosa
+        audio, sr = librosa.load(batch["audio_path"], sr=16000)
+        
+        inputs = processor(
             audio, sampling_rate=16000, return_tensors=None
-        ).input_values[0]
-        batch["labels"] = processor.tokenizer(batch["ipa_clean"]).input_ids
+        )
+        batch["input_values"] = inputs.input_values[0]
+        labels = processor.tokenizer(batch["ipa_clean"]).input_ids
+        
+        # CRITICAL: CTC requires input_length > label_length
+        # Wav2Vec2 reduces time by ~320x, so input_frames = len(audio) / 320
+        input_frames = len(batch["input_values"]) // 320
+        if len(labels) > input_frames:
+            # Truncate labels if too long
+            labels = labels[:input_frames]
+        
+        batch["labels"] = labels
+        batch["input_length"] = len(batch["input_values"])
+        batch["label_length"] = len(labels)
         return batch
     
     print("\n🔄 Preprocessing...")
+    # Remove audio-related columns before preprocessing
+    cols_to_remove = [c for c in train_ds.column_names if c not in ["audio_path", "ipa_clean"]]
+    train_ds = train_ds.remove_columns(cols_to_remove)
+    val_ds = val_ds.remove_columns(cols_to_remove)
+    
     train_ds = train_ds.map(preprocess, remove_columns=train_ds.column_names, num_proc=1)
     val_ds = val_ds.map(preprocess, remove_columns=val_ds.column_names, num_proc=1)
+    
+    # Filter samples where labels are too long
+    train_ds = train_ds.filter(lambda x: x["label_length"] > 0 and x["label_length"] < x["input_length"] // 320)
+    val_ds = val_ds.filter(lambda x: x["label_length"] > 0 and x["label_length"] < x["input_length"] // 320)
+    print(f"   Samples after filtering: Train={len(train_ds)}, Val={len(val_ds)}")
     
     # Metrics
     cer_metric = evaluate.load("cer")
@@ -265,7 +288,6 @@ def train_wav2vec2(
         cer = cer_metric.compute(predictions=preds, references=labels)
         return {"cer": cer}
     
-    # Training args
     training_args = TrainingArguments(
         output_dir=output_dir,
         num_train_epochs=epochs,
@@ -273,20 +295,22 @@ def train_wav2vec2(
         per_device_eval_batch_size=batch_size,
         gradient_accumulation_steps=4,
         learning_rate=learning_rate,
-        warmup_steps=500,
+        warmup_steps=1000,  # Increased warmup
         weight_decay=0.01,
-        fp16=True,
+        fp16=False,  # DISABLED - can cause NaN with CTC
+        bf16=torch.cuda.is_bf16_supported(),  # Use bf16 if available
         eval_strategy="epoch",
         save_strategy="epoch",
         save_total_limit=2,
         load_best_model_at_end=True,
         metric_for_best_model="cer",
         greater_is_better=False,
-        logging_steps=100,
+        logging_steps=50,
         dataloader_num_workers=0,
-        group_by_length=False,
+        group_by_length=True,  # Group similar lengths for efficiency
         gradient_checkpointing=True,
         report_to="none",
+        max_grad_norm=1.0,  # Clip gradients
     )
     
     # Trainer
@@ -335,7 +359,7 @@ def main():
     parser.add_argument("--output-dir", type=str, default="outputs/wav2vec2")
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=4)
-    parser.add_argument("--learning-rate", type=float, default=3e-5)
+    parser.add_argument("--learning-rate", type=float, default=1e-5)  # Lowered default
     parser.add_argument("--resume", action="store_true")
     
     args = parser.parse_args()

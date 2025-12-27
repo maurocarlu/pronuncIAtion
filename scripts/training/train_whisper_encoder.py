@@ -191,7 +191,13 @@ class DataCollatorWhisperCTC:
     
     def __call__(self, features: List[Dict]) -> Dict[str, torch.Tensor]:
         # Pad input features (mel spectrograms)
-        input_features = [f["input_features"] for f in features]
+        # Convert to numpy if stored as list (happens after dataset.map)
+        input_features = []
+        for f in features:
+            feat = f["input_features"]
+            if isinstance(feat, list):
+                feat = np.array(feat)
+            input_features.append(feat)
         
         # Stack and ensure correct shape
         max_len = max(f.shape[-1] for f in input_features)
@@ -325,15 +331,12 @@ def train_whisper_encoder(
     
     print(f"   Train: {len(train_ds)}, Val: {len(val_ds)}")
     
-    # Now cast audio column
-    train_ds = train_ds.cast_column("audio_path", Audio(sampling_rate=16000))
-    train_ds = train_ds.rename_column("audio_path", "audio")
-    val_ds = val_ds.cast_column("audio_path", Audio(sampling_rate=16000))
-    val_ds = val_ds.rename_column("audio_path", "audio")
+    # Preprocess - Extract mel spectrograms with MANUAL audio loading (avoids torchcodec)
+    import librosa
     
-    # Preprocess - Extract mel spectrograms (on-the-fly to save memory)
     def preprocess(batch):
-        audio = batch["audio"]["array"]
+        # Load audio manually with librosa
+        audio, sr = librosa.load(batch["audio_path"], sr=16000)
         mel = feature_extractor(
             audio, sampling_rate=16000, return_tensors="np"
         ).input_features[0]
@@ -342,6 +345,11 @@ def train_whisper_encoder(
         return batch
     
     print("\n🔄 Extracting mel spectrograms...")
+    # Keep only needed columns
+    cols_to_remove = [c for c in train_ds.column_names if c not in ["audio_path", "ipa_clean"]]
+    train_ds = train_ds.remove_columns(cols_to_remove)
+    val_ds = val_ds.remove_columns(cols_to_remove)
+    
     train_ds = train_ds.map(
         preprocess, 
         remove_columns=train_ds.column_names, 

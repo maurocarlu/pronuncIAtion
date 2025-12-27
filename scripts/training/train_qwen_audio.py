@@ -279,7 +279,13 @@ class DataCollatorQwenCTC:
     
     def __call__(self, features: List[Dict]) -> Dict[str, torch.Tensor]:
         # Pad mel features
-        input_features = [f["input_features"] for f in features]
+        # Convert to numpy if stored as list (happens after dataset.map)
+        input_features = []
+        for f in features:
+            feat = f["input_features"]
+            if isinstance(feat, list):
+                feat = np.array(feat)
+            input_features.append(feat)
         
         max_len = max(f.shape[-1] for f in input_features)
         padded = []
@@ -407,10 +413,7 @@ def train_qwen_audio(
     ds = ds.filter(lambda x: Path(x["audio_path"]).exists(), num_proc=1)
     print(f"   Samples: {len(ds)}")
     
-    ds = ds.cast_column("audio_path", Audio(sampling_rate=16000))
-    ds = ds.rename_column("audio_path", "audio")
-    
-    # Split
+    # Split BEFORE audio loading
     if "split" in ds.column_names:
         train_ds = ds.filter(lambda x: x["split"] == "train")
         val_ds = ds.filter(lambda x: x["split"] == "validation")
@@ -421,9 +424,12 @@ def train_qwen_audio(
     
     print(f"   Train: {len(train_ds)}, Val: {len(val_ds)}")
     
-    # Preprocess
+    # Preprocess with MANUAL audio loading (avoids torchcodec)
+    import librosa
+    
     def preprocess(batch):
-        audio = batch["audio"]["array"]
+        # Load audio manually with librosa
+        audio, sr = librosa.load(batch["audio_path"], sr=16000)
         mel = feature_extractor(
             audio, sampling_rate=16000, return_tensors="np"
         ).input_features[0]
@@ -432,6 +438,11 @@ def train_qwen_audio(
         return batch
     
     print("\n🔄 Extracting features...")
+    # Keep only needed columns
+    cols_to_remove = [c for c in train_ds.column_names if c not in ["audio_path", "ipa_clean"]]
+    train_ds = train_ds.remove_columns(cols_to_remove)
+    val_ds = val_ds.remove_columns(cols_to_remove)
+    
     train_ds = train_ds.map(preprocess, remove_columns=train_ds.column_names, num_proc=1)
     val_ds = val_ds.map(preprocess, remove_columns=val_ds.column_names, num_proc=1)
     
