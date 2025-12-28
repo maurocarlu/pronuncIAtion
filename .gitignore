@@ -36,9 +36,7 @@ wheels/
 
 # Vecchi dati in root (ora spostati in data/)
 phonemeref_data/
-phonemeref_metadata.csv
-phonemeref_processed.csv
-vocab.json
+
 
 # Nuova struttura dati (escludiamo audio/json pesanti)
 data/raw/phonemeref_data/audio/
