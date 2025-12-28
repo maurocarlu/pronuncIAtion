@@ -55,10 +55,11 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 # =============================================================================
 
 class DriveBackupCallback(TrainerCallback):
-    """Copia checkpoint su Drive dopo ogni salvataggio."""
+    """Copia checkpoint su Drive dopo ogni salvataggio. Mantiene solo gli ultimi 2."""
     
-    def __init__(self, backup_dir: str = None):
+    def __init__(self, backup_dir: str = None, keep_last: int = 2):
         self.backup_dir = backup_dir
+        self.keep_last = keep_last
         if '/content' in os.getcwd() or 'COLAB_GPU' in os.environ:
             self.env = 'colab'
             if not backup_dir:
@@ -71,6 +72,52 @@ class DriveBackupCallback(TrainerCallback):
             self.env = 'local'
             if not backup_dir:
                 self.backup_dir = None
+    
+    def _cleanup_old_backups(self, model_name: str):
+        """Elimina vecchi backup, mantiene solo gli ultimi N."""
+        if not self.backup_dir:
+            return
+        
+        import glob
+        import re
+        
+        if self.env == 'kaggle':
+            pattern = f"{self.backup_dir}/{model_name}_checkpoint-*.zip"
+            backups = glob.glob(pattern)
+            
+            if len(backups) > self.keep_last:
+                # Ordina per step number (dal più vecchio al più recente)
+                def get_step(path):
+                    match = re.search(r'checkpoint-(\d+)', path)
+                    return int(match.group(1)) if match else 0
+                
+                backups.sort(key=get_step)
+                # Elimina i più vecchi
+                to_delete = backups[:-self.keep_last]
+                for old_backup in to_delete:
+                    try:
+                        os.remove(old_backup)
+                        print(f"   🗑️ Deleted old: {Path(old_backup).name}")
+                    except Exception as e:
+                        print(f"   ⚠️ Delete failed: {e}")
+        
+        elif self.env == 'colab':
+            backup_model_dir = Path(self.backup_dir) / model_name
+            if backup_model_dir.exists():
+                checkpoints = list(backup_model_dir.glob("checkpoint-*"))
+                if len(checkpoints) > self.keep_last:
+                    def get_step(path):
+                        match = re.search(r'checkpoint-(\d+)', str(path))
+                        return int(match.group(1)) if match else 0
+                    
+                    checkpoints.sort(key=get_step)
+                    to_delete = checkpoints[:-self.keep_last]
+                    for old_ckpt in to_delete:
+                        try:
+                            shutil.rmtree(old_ckpt)
+                            print(f"   🗑️ Deleted old: {old_ckpt.name}")
+                        except Exception as e:
+                            print(f"   ⚠️ Delete failed: {e}")
     
     def on_save(self, args, state, control, **kwargs):
         if not self.backup_dir:
@@ -99,6 +146,10 @@ class DriveBackupCallback(TrainerCallback):
                     zip_path = Path(self.backup_dir) / f"{model_name}_checkpoint-{state.global_step}"
                     shutil.make_archive(str(zip_path), 'zip', checkpoint_dir)
                     print(f"\n💾 Checkpoint compresso: {zip_path}.zip")
+                
+                # Cleanup old backups
+                self._cleanup_old_backups(model_name)
+                
             except Exception as e:
                 print(f"\n⚠️ Backup fallito: {e}")
 
