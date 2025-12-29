@@ -164,6 +164,7 @@ class DataCollatorCTCWithPadding:
     def __init__(self, processor: Wav2Vec2Processor, padding: bool = True):
         self.processor = processor
         self.padding = padding
+        self._debug_printed = False
     
     def __call__(self, features: List[Dict]) -> Dict[str, torch.Tensor]:
         input_features = [{"input_values": f["input_values"]} for f in features]
@@ -173,6 +174,7 @@ class DataCollatorCTCWithPadding:
             input_features,
             padding=self.padding,
             return_tensors="pt",
+            return_attention_mask=True,  # EXPLICIT
         )
         
         labels_batch = self.processor.tokenizer.pad(
@@ -186,6 +188,28 @@ class DataCollatorCTCWithPadding:
         )
         
         batch["labels"] = labels
+        
+        # [DEBUG] Print first batch details
+        if not self._debug_printed:
+            self._debug_printed = True
+            print("\n🔍 DEBUG: First Batch Details")
+            print(f"   input_values shape: {batch['input_values'].shape}")
+            if 'attention_mask' in batch:
+                print(f"   attention_mask shape: {batch['attention_mask'].shape}")
+                # Calculate actual lengths for first sample
+                actual_len = batch['attention_mask'][0].sum().item()
+                output_frames = actual_len // 320
+                print(f"   Sample 0: audio_len={actual_len}, output_frames≈{output_frames}")
+            else:
+                print("   ⚠️ NO attention_mask in batch!")
+            print(f"   labels shape: {batch['labels'].shape}")
+            # Count non-pad labels for first sample
+            valid_labels = (batch['labels'][0] != -100).sum().item()
+            print(f"   Sample 0: valid_labels={valid_labels}")
+            if 'attention_mask' in batch:
+                if valid_labels >= (batch['attention_mask'][0].sum().item() // 320):
+                    print("   ⚠️ WARNING: label_length >= output_frames! CTC will fail!")
+        
         return batch
 
 
