@@ -16,9 +16,10 @@ Per dettagli sulle metriche, vedi **[docs/BENCHMARK_GUIDE.md](docs/BENCHMARK_GUI
 | **XLS-R 300M** | 39.40% | 0.5589 | 0.8435 | Multilingual |
 | **HuBERT Large** | 8.84% | 0.5932 | 0.8426 | **Best PER & Correlation** |
 | **SpeechTokenizer** | 60.85% | 0.3842 | 0.7311 | Discrete tokens (lossy) |
-| **Wav2Vec2** | TBD | TBD | TBD | Training in corso |
-| **Whisper Enc** | TBD | TBD | TBD | Training in corso |
-| **Qwen2-Audio** | TBD | TBD | TBD | Training in corso |
+| **Wav2Vec2** | TBD | TBD | TBD | LR=3e-4, 10 epochs |
+| **Whisper Enc** | TBD | TBD | TBD | Small encoder, last 4 layers |
+| **Qwen2-Audio** | TBD | TBD | TBD | Linear Probe (encoder frozen) |
+| **Wav2Vec2-BERT** | TBD | TBD | TBD | Fine-tuning, 10 epochs |
 
 ---
 
@@ -48,6 +49,18 @@ Per dettagli sulle metriche, vedi **[docs/BENCHMARK_GUIDE.md](docs/BENCHMARK_GUI
 
 ---
 
+## 📐 Configurazioni Training
+
+| Modello | LR | Batch | Epochs | Mode | Script |
+|---------|-----|-------|--------|------|--------|
+| Wav2Vec2 | 3e-4 | 4 | 10 | Fine-tuning | `train_wav2vec2.py` |
+| Whisper Enc | 3e-4 | 4 | 10 | Partial (last 4) | `train_whisper_encoder.py` |
+| Qwen2-Audio | 1e-3 | 2 | 10 | **Linear Probe** | `train_qwen_audio.py` |
+| Wav2Vec2-BERT | 3e-4 | 4 | 10 | Fine-tuning | `train_w2v2_bert.py` |
+| SpeechTokenizer | 1e-3 | 4 | 10 | 2-Stage | `train_speechtokenizer.py` |
+
+---
+
 ## ✅ Lista Modelli Implementati
 
 1. **Baseline MLP** (`train_baseline_mlp.py`)
@@ -58,12 +71,13 @@ Per dettagli sulle metriche, vedi **[docs/BENCHMARK_GUIDE.md](docs/BENCHMARK_GUI
 6. **Wav2Vec2** (`train_wav2vec2.py`)
 7. **Whisper Encoder** (`train_whisper_encoder.py`)
 8. **SpeechTokenizer** (`train_speechtokenizer.py`)
-9. **Qwen2-Audio** (`train_qwen_audio.py`)
+9. **Qwen2-Audio** (`train_qwen_audio.py`) - Linear Probe
+10. **Wav2Vec2-BERT** (`train_w2v2_bert.py`) - NEW
 
 ---
 
 ## 🔜 Next Steps
 
-1. Completare training **Qwen2-Audio** (testare se LLM feature aiutano).
-2. Investigare perché **HuBERT** performa così meglio di WavLM (forse il denoising di WavLM è eccessivo per la valutazione della pronuncia?).
-3. Provare **Fusion** tra SpeechTokenizer (Discreto) e HuBERT (Continuo).
+1. Completare training **Wav2Vec2-BERT** e confrontare con Wav2Vec2 standard.
+2. Testare **Qwen2-Audio** Linear Probe per valutare feature multimodali.
+3. Investigare perché **HuBERT** performa così meglio di WavLM.

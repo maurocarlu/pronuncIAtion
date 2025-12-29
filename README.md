@@ -26,6 +26,24 @@ La documentazione completa del progetto è disponibile nella cartella [`docs/`](
 - **Benchmark scientifico** su SpeechOcean762 (speaker non-nativi)
 - **Supporto multi-ambiente**: Locale, Google Colab, Kaggle
 
+---
+
+## 🤖 Modelli Implementati
+
+| Modello | Params | Mode | VRAM | Script |
+|---------|--------|------|------|--------|
+| WavLM Large | 317M | Fine-tuning | ~12GB | `train_wavlm.py` |
+| HuBERT Large | 317M | Fine-tuning | ~12GB | `train_hubert.py` |
+| Wav2Vec2 Large | 317M | Fine-tuning | ~12GB | `train_wav2vec2.py` |
+| XLS-R 300M | 300M | Fine-tuning | ~10GB | `train_xlsr.py` |
+| Whisper (Encoder) | 244M | Last 4 layers | ~8GB | `train_whisper_encoder.py` |
+| SpeechTokenizer | 256K | 2-Stage | ~4GB | `train_speechtokenizer.py` |
+| **Qwen2-Audio** | **260K** | **Linear Probe** | **~5GB** | `train_qwen_audio.py` |
+| **Wav2Vec2-BERT** | **600M** | **Fine-tuning** | **~12GB** | `train_w2v2_bert.py` |
+| Baseline MLP | 2M | Linear Probe | ~4GB | `train_baseline_mlp.py` |
+
+> Dettagli completi: [docs/MODEL_ZOO.md](docs/MODEL_ZOO.md)
+
 ## Quick Start
 
 ### Installazione

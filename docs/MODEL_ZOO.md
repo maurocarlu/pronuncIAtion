@@ -100,22 +100,40 @@ Approccio radicalmente diverso basato su token discreti.
 
 ---
 
-## 7. Qwen2-Audio (4-bit)
+## 7. Qwen2-Audio (Linear Probe)
 
 | Parametro | Valore |
 |-----------|--------|
 | **Backbone** | `Qwen/Qwen2-Audio-7B-Instruct` (Audio Tower) |
 | **Quantizzazione** | 4-bit (bitsandbytes NF4) |
-| **Parametri Audio** | ~1B (originale) |
+| **Params Totali** | ~1B (FROZEN) |
+| **Params Trainabili** | ~260k (CTC Head only) |
+| **VRAM** | ~5-6GB |
 
 ### Caratteristiche
 Modello multimodale (LLM + Audio). Estraiamo solo la "Audio Tower" pre-trainata.
-**Sfida**: Enorme consumo di memoria.
-**Soluzione**: Quantizzazione 4-bit (`load_in_4bit=True`). L'encoder è completamente congelato; alleniamo solo la CTC head finale.
+**Modalità**: Linear Probe (encoder completamente frozen, solo CTC head trainabile).
+**Obiettivo**: Valutare feature "zero-shot" del modello multimodale.
 
 ---
 
-## 8. Baseline MLP (Linear Probe)
+## 8. Wav2Vec2-BERT 2.0
+
+| Parametro | Valore |
+|-----------|--------|
+| **Backbone** | `facebook/w2v-bert-2.0` |
+| **Parametri** | ~600M |
+| **Pre-training** | Contrastive + Masked Language Modeling |
+| **VRAM** | ~10-12GB |
+
+### Caratteristiche
+Combina il contrastive learning di Wav2Vec2 con MLM di BERT.
+**Training**: Fine-tuning completo (10 epochs, LR=3e-4).
+**Motivazione**: Testare se l'obiettivo MLM aggiuntivo migliora le rappresentazioni fonetiche.
+
+---
+
+## 9. Baseline MLP (Linear Probe)
 
 | Parametro | Valore |
 |-----------|--------|
@@ -125,3 +143,19 @@ Modello multimodale (LLM + Audio). Estraiamo solo la "Audio Tower" pre-trainata.
 
 ### Caratteristiche
 Modello "stupido" di controllo. Se un classificatore semplice su feature medie funziona bene, il task è troppo facile. Serve come *lower bound*.
+
+---
+
+## Tabella Riassuntiva
+
+| Modello | Params | Training Mode | VRAM | Script |
+|---------|--------|---------------|------|--------|
+| WavLM Large | 317M | Fine-tuning | ~12GB | - |
+| HuBERT Large | 317M | Fine-tuning | ~12GB | - |
+| Wav2Vec2 Large | 317M | Fine-tuning | ~12GB | `train_wav2vec2.py` |
+| XLS-R 300M | 300M | Fine-tuning | ~10GB | - |
+| Whisper Small (Encoder) | 244M | Partial Fine-tuning | ~8GB | `train_whisper_encoder.py` |
+| SpeechTokenizer | 256K train | 2-Stage (Classifier) | ~4GB | `train_speechtokenizer.py` |
+| **Qwen2-Audio** | **260K train** | **Linear Probe** | **~5GB** | `train_qwen_audio.py` |
+| **Wav2Vec2-BERT** | **600M** | **Fine-tuning** | **~12GB** | `train_w2v2_bert.py` |
+| Baseline MLP | 2M train | Linear Probe | ~4GB | `train_baseline_mlp.py` |

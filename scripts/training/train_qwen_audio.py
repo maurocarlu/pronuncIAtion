@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Training script per Qwen2-Audio Encoder con CTC.
+Training script per Qwen2-Audio Encoder con CTC - LINEAR PROBE MODE.
 
 =============================================================================
 MOTIVAZIONE SCIENTIFICA
@@ -9,17 +9,22 @@ MOTIVAZIONE SCIENTIFICA
 Qwen2-Audio è un modello multimodale SOTA che include un potente audio encoder.
 Estraiamo solo la parte audio_tower e aggiungiamo una testa CTC.
 
+**LINEAR PROBE MODE**: L'encoder è COMPLETAMENTE FROZEN.
+Solo la CTC head viene addestrata. Questo valuta la qualità delle
+feature "zero-shot" del modello multimodale.
+
 Questo test verifica:
 - Se encoder multimodali generalizzano a phoneme recognition
 - La potenza di rappresentazioni audio da modelli 7B
 
 IMPORTANTE:
 - Usiamo quantizzazione 4-bit con bitsandbytes per ridurre VRAM
-- Gradient checkpointing per backpropagation efficiente
-- Solo l'audio encoder, non il decoder LLM
+- Encoder completamente frozen (Linear Probe)
+- Solo CTC head trainabile (~260k parametri)
 
-MODELLO: Qwen/Qwen2-Audio-7B
-- Audio encoder: ~1B parametri
+MODELLO: Qwen/Qwen2-Audio-7B-Instruct
+- Audio encoder: ~1B parametri (FROZEN)
+- CTC head: ~260k parametri (TRAINABLE)  
 - Quantizzazione: 4-bit (BNB)
 - VRAM stimata: ~5-6GB
 

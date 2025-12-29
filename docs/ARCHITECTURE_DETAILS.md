@@ -130,42 +130,76 @@ class DiscreteTokenClassifier(nn.Module):
 
 ---
 
-## 4. Qwen2-Audio & 4-Bit Quantization
+## 4. Qwen2-Audio: Linear Probe Mode
 
 ### 🔬 La Sfida
-Qwen2-Audio ha un encoder audio massiccio (~1 miliardo di parametri). È impossibile fare fine-tuning completo su GPU consumer (come le T4 di Colab o le schede locali < 24GB VRAM).
+Qwen2-Audio ha un encoder audio massiccio (~1 miliardo di parametri). È impossibile fare fine-tuning completo su GPU consumer.
 
-### 🛠️ Soluzione: QLoRA-style Adaptation
-Usiamo `bitsandbytes` per caricare il modello in 4-bit e alleniamo solo un piccolo adapter.
+### 🛠️ Soluzione: Linear Probe (Feature Extraction)
+**L'encoder è COMPLETAMENTE FROZEN**. Solo una piccola CTC head viene addestrata.
+Questo valuta le feature "zero-shot" del modello multimodale.
 
 #### Caricamento 4-bit
 ```python
 bnb_config = BitsAndBytesConfig(
     load_in_4bit=True,
-    bnb_4bit_quant_type="nf4",       # Normal Float 4 (SOTA per precisione)
+    bnb_4bit_quant_type="nf4",
     bnb_4bit_compute_dtype=torch.float16
 )
-# Il modello occupa solo ~5GB VRAM invece di ~16GB
+# VRAM: ~5GB invece di ~16GB
 ```
 
-#### Gradient Barrier
-Non possiamo calcolare gradienti attraverso i layer 4-bit.
-1.  **Encoder Congelato**: `model.audio_tower.requires_grad_(False)`
-2.  **Cast Output**: L'output dell'encoder è float16.
-3.  **Adapter Trainable**: Un MLP a 2 layer in float32 che impara a mappare le feature di Qwen ai fonemi.
+#### Architettura
+```
+Audio → Qwen2-Audio Encoder (FROZEN, 4-bit) → CTC Head (TRAINABLE, ~260k params)
+```
 
 ```python
-self.adapter = nn.Sequential(
-    nn.Linear(1280, 512),  # Qwen Hidden -> 512
-    nn.GELU(),
-    nn.Dropout(0.1),
-    nn.Linear(512, vocab_size)
-)
+# Forward pass: encoder completamente disabilitato per gradients
+with torch.no_grad():
+    hidden = self.audio_encoder(mel_features)
+logits = self.ctc_head(hidden)  # Solo questo layer apprende
 ```
+
+**Parametri Trainabili**: ~260k (solo CTC head)
+**VRAM Stimata**: ~5-6GB
 
 ---
 
-## 5. Ensemble via Late Fusion
+## 5. Wav2Vec2-BERT 2.0
+
+### 🔬 Innovazione
+W2V-BERT 2.0 combina il **contrastive learning** di Wav2Vec2 con la **masked language modeling** di BERT, ottenendo rappresentazioni audio più ricche e contestualizzate.
+
+### 🛠️ Architettura
+```
+Raw Audio (16kHz) → Feature Encoder → Transformer (24 layers) → CTC Head
+```
+
+**Modello**: `facebook/w2v-bert-2.0`
+- 24 Transformer layers, 1024 hidden
+- ~600M parametri totali
+- SOTA su LibriSpeech
+
+#### Implementazione
+```python
+from transformers import Wav2Vec2BertForCTC
+
+model = Wav2Vec2BertForCTC.from_pretrained(
+    "facebook/w2v-bert-2.0",
+    vocab_size=45,  # IPA vocab
+    ctc_loss_reduction="mean",
+    ignore_mismatched_sizes=True,
+)
+model.freeze_feature_encoder()  # Stabilità training
+model.gradient_checkpointing_enable()  # Riduce VRAM
+```
+
+**Differenza da Wav2Vec2**: L'obiettivo MLM aggiuntivo migliora la comprensione contestuale, potenzialmente utile per fonemi co-articolati.
+
+---
+
+## 6. Ensemble via Late Fusion
 
 ### 🛠️ Implementazione
 La fusione avviene a livello di **logits** (prima della softmax), per preservare l'incertezza del modello.
