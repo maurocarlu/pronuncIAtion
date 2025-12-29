@@ -78,3 +78,41 @@ SpeechTokenizer richiede uno script dedicato a causa del preprocessing diverso (
 ```bash
 python scripts/evaluation/evaluate_speechtokenizer.py --model-path outputs/speechtokenizer
 ```
+
+---
+
+## 4. Troubleshooting
+
+### CTC Loss = 0.0, grad_norm = NaN
+
+**Sintomo**: Il training mostra `loss: 0.0` e `grad_norm: nan` fin dal primo step.
+
+**Causa**: Il `Wav2Vec2CTCTokenizer` aggiunge automaticamente token BOS/EOS che non sono nel `vocab.json`, causando un mismatch di vocab size (es. 43 vs 45).
+
+**Diagnosi**: Controlla il log per:
+```
+Updated tokens: {'eos_token_id': 44, 'bos_token_id': 43}
+```
+
+**Soluzione**: Aggiungi `bos_token=None, eos_token=None` alla creazione del tokenizer:
+```python
+tokenizer = Wav2Vec2CTCTokenizer(
+    vocab_path,
+    unk_token="[UNK]",
+    pad_token="[PAD]",
+    word_delimiter_token="|",
+    bos_token=None,  # CRITICAL
+    eos_token=None,  # CRITICAL
+)
+```
+
+### Label Length >= Output Frames
+
+**Sintomo**: CTC fallisce silenziosamente (loss = 0 con `ctc_zero_infinity=True`).
+
+**Causa**: Le trascrizioni IPA sono troppo lunghe rispetto ai frame audio dopo il downsampling (320x per Wav2Vec2).
+
+**Soluzione**: Filtra i sample nel preprocessing:
+```python
+ds = ds.filter(lambda x: x["label_length"] < x["input_length"] // 320)
+```

@@ -204,9 +204,13 @@ def train_w2v2_bert(
         ignore_mismatched_sizes=True,
     )
     
-    # Freeze feature encoder
-    model.freeze_feature_encoder()
-    print("   ✓ Feature encoder frozen")
+    # Freeze feature projection (Wav2Vec2-BERT doesn't have freeze_feature_encoder)
+    if hasattr(model, 'wav2vec2_bert'):
+        for param in model.wav2vec2_bert.feature_projection.parameters():
+            param.requires_grad = False
+        print("   ✓ Feature projection frozen")
+    else:
+        print("   ⚠️ Could not find wav2vec2_bert module to freeze")
     
     model.gradient_checkpointing_enable()
     print("   ✓ Gradient checkpointing enabled")

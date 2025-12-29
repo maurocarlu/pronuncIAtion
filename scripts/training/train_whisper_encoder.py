@@ -208,7 +208,7 @@ class WhisperEncoderForCTC(nn.Module):
             
             loss = nn.functional.ctc_loss(
                 log_probs, labels_for_ctc, input_lengths, target_lengths,
-                blank=0, zero_infinity=True
+                blank=0, zero_infinity=True, reduction='mean'
             )
         
         return {"loss": loss, "logits": logits}

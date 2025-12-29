@@ -454,6 +454,14 @@ def train_qwen_audio(
     
     ds = ds.map(fix_audio_path, num_proc=1)
     ds = ds.filter(lambda x: Path(x["audio_path"]).exists(), num_proc=1)
+    
+    # Limit samples for Kaggle (Qwen2 is very slow)
+    if '/kaggle' in os.getcwd():
+        max_samples = 10000
+        if len(ds) > max_samples:
+            ds = ds.shuffle(seed=42).select(range(max_samples))
+            print(f"   ⚠️ Kaggle mode: limiting to {max_samples} samples")
+    
     print(f"   Samples: {len(ds)}")
     
     # Split BEFORE audio loading
