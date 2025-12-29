@@ -403,6 +403,8 @@ def train_qwen_audio(
         unk_token="[UNK]",
         pad_token="[PAD]",
         word_delimiter_token="|",
+        bos_token=None,
+        eos_token=None,
     )
     vocab_size = len(tokenizer)
     print(f"   Vocab size: {vocab_size}")

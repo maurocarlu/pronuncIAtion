@@ -173,6 +173,8 @@ def train_w2v2_bert(
         unk_token="[UNK]",
         pad_token="[PAD]",
         word_delimiter_token="|",
+        bos_token=None,
+        eos_token=None,
     )
     
     feature_extractor = Wav2Vec2FeatureExtractor(

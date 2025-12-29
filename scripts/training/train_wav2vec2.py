@@ -216,6 +216,8 @@ def train_wav2vec2(
         unk_token="[UNK]",
         pad_token="[PAD]",
         word_delimiter_token="|",
+        bos_token=None,  # CRITICAL: Disable auto BOS token
+        eos_token=None,  # CRITICAL: Disable auto EOS token
     )
     
     feature_extractor = Wav2Vec2FeatureExtractor(
