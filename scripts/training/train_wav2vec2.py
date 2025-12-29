@@ -410,7 +410,7 @@ def main():
     parser.add_argument("--output-dir", type=str, default="outputs/wav2vec2")
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=4)
-    parser.add_argument("--learning-rate", type=float, default=1e-5)  # Lowered default
+    parser.add_argument("--learning-rate", type=float, default=3e-4)  # Standard for Wav2Vec2 fine-tuning
     parser.add_argument("--resume", action="store_true")
     
     args = parser.parse_args()
