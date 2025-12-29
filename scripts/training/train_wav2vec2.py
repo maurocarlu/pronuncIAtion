@@ -204,8 +204,14 @@ class DataCollatorCTCWithPadding:
                 print("   ⚠️ NO attention_mask in batch!")
             print(f"   labels shape: {batch['labels'].shape}")
             # Count non-pad labels for first sample
-            valid_labels = (batch['labels'][0] != -100).sum().item()
+            first_labels = batch['labels'][0]
+            valid_ids = first_labels[first_labels != -100].tolist()
+            valid_labels = len(valid_ids)
             print(f"   Sample 0: valid_labels={valid_labels}")
+            # Print actual label values for first sample
+            print(f"   Sample 0 label IDs: {valid_ids}")
+            if 0 in valid_ids:
+                print("   ⚠️ CRITICAL: Labels contain blank token (0)! CTC will fail!")
             if 'attention_mask' in batch:
                 if valid_labels >= (batch['attention_mask'][0].sum().item() // 320):
                     print("   ⚠️ WARNING: label_length >= output_frames! CTC will fail!")
