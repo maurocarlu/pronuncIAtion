@@ -309,7 +309,7 @@ def train_w2v2_bert(
         greater_is_better=False,
         fp16=torch.cuda.is_available(),
         dataloader_num_workers=0,
-        group_by_length=True,
+        group_by_length=False,
         gradient_checkpointing=True,
         max_grad_norm=1.0,
     )

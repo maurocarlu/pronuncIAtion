@@ -451,7 +451,7 @@ def train_wav2vec2(
         greater_is_better=False,
         logging_steps=50,
         dataloader_num_workers=0,
-        group_by_length=True,  # Group similar lengths for efficiency
+        group_by_length=False,  # Group similar lengths for efficiency
         gradient_checkpointing=True,
         report_to="none",
         max_grad_norm=1.0,  # Clip gradients
