@@ -189,32 +189,59 @@ class DataCollatorCTCWithPadding:
         
         batch["labels"] = labels
         
-        # [DEBUG] Print first batch details
+        # [DEBUG] Print first batch details with EXACT output length calculation
         if not self._debug_printed:
             self._debug_printed = True
             print("\n🔍 DEBUG: First Batch Details")
             print(f"   input_values shape: {batch['input_values'].shape}")
+            
+            # Wav2Vec2's exact output length formula
+            def get_exact_output_length(input_length):
+                # conv_kernel = [10, 3, 3, 3, 3, 2, 2]
+                # conv_stride = [5, 2, 2, 2, 2, 2, 2]
+                length = input_length
+                for kernel, stride in zip([10, 3, 3, 3, 3, 2, 2], [5, 2, 2, 2, 2, 2, 2]):
+                    length = (length - kernel) // stride + 1
+                return length
+            
             if 'attention_mask' in batch:
                 print(f"   attention_mask shape: {batch['attention_mask'].shape}")
-                # Calculate actual lengths for first sample
-                actual_len = batch['attention_mask'][0].sum().item()
-                output_frames = actual_len // 320
-                print(f"   Sample 0: audio_len={actual_len}, output_frames≈{output_frames}")
+                
+                # Check ALL samples in batch
+                bad_samples = 0
+                for i in range(batch['attention_mask'].shape[0]):
+                    audio_len = batch['attention_mask'][i].sum().item()
+                    output_frames = get_exact_output_length(int(audio_len))
+                    label_mask = batch['labels'][i] != -100
+                    label_len = label_mask.sum().item()
+                    
+                    if i == 0:
+                        print(f"   Sample 0: audio_len={audio_len}, output_frames={output_frames}, label_len={label_len}")
+                    
+                    if label_len >= output_frames:
+                        bad_samples += 1
+                        if bad_samples <= 3:
+                            print(f"   ⚠️ Sample {i}: label({label_len}) >= output({output_frames})!")
+                
+                if bad_samples > 0:
+                    print(f"   ❌ CRITICAL: {bad_samples}/{batch['attention_mask'].shape[0]} samples have invalid lengths!")
             else:
                 print("   ⚠️ NO attention_mask in batch!")
+            
             print(f"   labels shape: {batch['labels'].shape}")
             # Count non-pad labels for first sample
             first_labels = batch['labels'][0]
             valid_ids = first_labels[first_labels != -100].tolist()
-            valid_labels = len(valid_ids)
-            print(f"   Sample 0: valid_labels={valid_labels}")
-            # Print actual label values for first sample
             print(f"   Sample 0 label IDs: {valid_ids}")
-            if 0 in valid_ids:
-                print("   ⚠️ CRITICAL: Labels contain blank token (0)! CTC will fail!")
-            if 'attention_mask' in batch:
-                if valid_labels >= (batch['attention_mask'][0].sum().item() // 320):
-                    print("   ⚠️ WARNING: label_length >= output_frames! CTC will fail!")
+            
+            # Check label range
+            all_labels = batch['labels'][batch['labels'] != -100]
+            if len(all_labels) > 0:
+                max_label = all_labels.max().item()
+                min_label = all_labels.min().item()
+                print(f"   Label range: [{min_label}, {max_label}] (vocab_size should be > {max_label})")
+                if 0 in valid_ids:
+                    print("   ⚠️ CRITICAL: Labels contain blank token (0)! CTC will fail!")
         
         return batch
 
