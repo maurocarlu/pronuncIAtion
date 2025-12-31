@@ -257,7 +257,7 @@ def train_wav2vec2(
     audio_base_path: str = ".",
     epochs: int = 10,
     batch_size: int = 4,
-    learning_rate: float = 1e-5,  # LOWERED from 3e-5 to prevent CTC collapse
+    learning_rate: float = 5e-6,  # Very conservative to prevent CTC collapse
     resume: bool = False,
 ):
     """Training Wav2Vec2 Large con CTC."""
@@ -377,20 +377,23 @@ def train_wav2vec2(
         inputs = processor(
             audio, sampling_rate=16000, return_tensors=None
         )
-        batch["input_values"] = inputs.input_values[0]
+        input_values = inputs.input_values[0]
         labels = processor.tokenizer(batch["ipa_clean"]).input_ids
         
         # CRITICAL: CTC requires input_length > label_length
         # Wav2Vec2 reduces time by ~320x, so input_frames = len(audio) / 320
-        input_frames = len(batch["input_values"]) // 320
+        input_frames = len(input_values) // 320
         if len(labels) > input_frames:
             # Truncate labels if too long
             labels = labels[:input_frames]
         
-        batch["labels"] = labels
-        batch["input_length"] = len(batch["input_values"])
-        batch["label_length"] = len(labels)
-        return batch
+        # Return a new dict - required when using remove_columns with map()
+        return {
+            "input_values": input_values,
+            "labels": labels,
+            "input_length": len(input_values),
+            "label_length": len(labels),
+        }
     
     print("\n🔄 Preprocessing...")
     # Remove audio-related columns before preprocessing
@@ -400,6 +403,9 @@ def train_wav2vec2(
     
     train_ds = train_ds.map(preprocess, remove_columns=train_ds.column_names, num_proc=1)
     val_ds = val_ds.map(preprocess, remove_columns=val_ds.column_names, num_proc=1)
+    
+    # Debug: print columns after preprocessing
+    print(f"   Dataset columns after preprocess: {train_ds.column_names}")
     
     # Filter samples where labels are too long
     train_ds = train_ds.filter(lambda x: x["label_length"] > 0 and x["label_length"] < x["input_length"] // 320)
@@ -439,8 +445,8 @@ def train_wav2vec2(
         per_device_eval_batch_size=batch_size,
         gradient_accumulation_steps=4,
         learning_rate=learning_rate,
-        warmup_steps=1000,  # Increased warmup
-        weight_decay=0.01,
+        warmup_steps=2000,  # Extended warmup to prevent CTC collapse
+        weight_decay=0.001,  # Lower weight decay
         fp16=False,  # DISABLED - can cause NaN with CTC
         bf16=torch.cuda.is_bf16_supported(),  # Use bf16 if available
         eval_strategy="epoch",
@@ -503,7 +509,7 @@ def main():
     parser.add_argument("--output-dir", type=str, default="outputs/wav2vec2")
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=4)
-    parser.add_argument("--learning-rate", type=float, default=3e-4)  # Standard for Wav2Vec2 fine-tuning
+    parser.add_argument("--learning-rate", type=float, default=5e-6)  # Conservative LR to prevent CTC collapse
     parser.add_argument("--resume", action="store_true")
     
     args = parser.parse_args()

@@ -130,6 +130,11 @@ class DataCollatorCTCWithPadding:
         self.padding = padding
     
     def __call__(self, features: List[Dict]) -> Dict[str, torch.Tensor]:
+        # Debug: check keys in first feature
+        if features and hasattr(self, '_debug_printed') is False:
+            self._debug_printed = True
+            print(f"   [DEBUG] Feature keys: {list(features[0].keys())}")
+        
         input_features = [{"input_values": f["input_values"]} for f in features]
         label_features = [{"input_ids": f["labels"]} for f in features]
         
@@ -157,7 +162,7 @@ def train_w2v2_bert(
     audio_base_path: str = ".",
     epochs: int = 10,
     batch_size: int = 4,
-    learning_rate: float = 3e-4,
+    learning_rate: float = 5e-6,  # Very conservative to prevent CTC collapse
     resume: bool = False,
 ):
     """Training Wav2Vec2-BERT 2.0 con CTC."""
@@ -251,17 +256,20 @@ def train_w2v2_bert(
     def preprocess(batch):
         audio, sr = librosa.load(batch["audio_path"], sr=16000)
         inputs = processor(audio, sampling_rate=16000, return_tensors=None)
-        batch["input_values"] = inputs.input_values[0]
+        input_values = inputs.input_values[0]
         labels = processor.tokenizer(batch["ipa_clean"]).input_ids
         
-        input_frames = len(batch["input_values"]) // 320
+        input_frames = len(input_values) // 320
         if len(labels) > input_frames:
             labels = labels[:input_frames]
         
-        batch["labels"] = labels
-        batch["input_length"] = len(batch["input_values"])
-        batch["label_length"] = len(labels)
-        return batch
+        # Return a new dict - required when using remove_columns with map()
+        return {
+            "input_values": input_values,
+            "labels": labels,
+            "input_length": len(input_values),
+            "label_length": len(labels),
+        }
     
     print("\n🔄 Preprocessing...")
     cols = [c for c in train_ds.column_names if c not in ["audio_path", "ipa_clean"]]
@@ -270,6 +278,9 @@ def train_w2v2_bert(
     
     train_ds = train_ds.map(preprocess, remove_columns=train_ds.column_names, num_proc=1)
     val_ds = val_ds.map(preprocess, remove_columns=val_ds.column_names, num_proc=1)
+    
+    # Debug: print columns after preprocessing
+    print(f"   Dataset columns after preprocess: {train_ds.column_names}")
     
     train_ds = train_ds.filter(lambda x: x["label_length"] > 0 and x["label_length"] < x["input_length"] // 320)
     val_ds = val_ds.filter(lambda x: x["label_length"] > 0 and x["label_length"] < x["input_length"] // 320)
@@ -296,8 +307,8 @@ def train_w2v2_bert(
         per_device_eval_batch_size=batch_size,
         gradient_accumulation_steps=4,
         learning_rate=learning_rate,
-        warmup_steps=500,
-        weight_decay=0.01,
+        warmup_steps=2000,  # Extended warmup to prevent CTC collapse
+        weight_decay=0.001,  # Lower weight decay
         logging_steps=50,
         eval_strategy="steps",
         eval_steps=500,
@@ -307,11 +318,13 @@ def train_w2v2_bert(
         load_best_model_at_end=True,
         metric_for_best_model="cer",
         greater_is_better=False,
-        fp16=torch.cuda.is_available(),
+        fp16=False,  # Disabled - can cause instability with CTC
+        bf16=torch.cuda.is_bf16_supported(),  # Use bf16 if available
         dataloader_num_workers=0,
         group_by_length=False,
         gradient_checkpointing=True,
         max_grad_norm=1.0,
+        report_to="none",
     )
     
     trainer = Trainer(
@@ -351,7 +364,7 @@ def main():
     parser.add_argument("--output-dir", type=str, default="outputs/w2v2_bert")
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=4)
-    parser.add_argument("--learning-rate", type=float, default=3e-4)
+    parser.add_argument("--learning-rate", type=float, default=5e-6)  # Conservative LR to prevent CTC collapse
     parser.add_argument("--resume", action="store_true")
     
     args = parser.parse_args()
