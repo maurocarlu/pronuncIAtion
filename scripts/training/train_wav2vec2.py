@@ -408,8 +408,8 @@ def train_wav2vec2(
     train_ds = train_ds.remove_columns(cols_to_remove)
     val_ds = val_ds.remove_columns(cols_to_remove)
     
-    train_ds = train_ds.map(preprocess, remove_columns=train_ds.column_names, num_proc=1)
-    val_ds = val_ds.map(preprocess, remove_columns=val_ds.column_names, num_proc=1)
+    train_ds = train_ds.map(preprocess, remove_columns=train_ds.column_names, num_proc=1, load_from_cache_file=False)
+    val_ds = val_ds.map(preprocess, remove_columns=val_ds.column_names, num_proc=1, load_from_cache_file=False)
     
     # Debug: print columns after preprocessing
     print(f"   Dataset columns after preprocess: {train_ds.column_names}")

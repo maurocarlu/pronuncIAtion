@@ -284,8 +284,8 @@ def train_w2v2_bert(
     train_ds = train_ds.remove_columns(cols)
     val_ds = val_ds.remove_columns(cols)
     
-    train_ds = train_ds.map(preprocess, remove_columns=train_ds.column_names, num_proc=1)
-    val_ds = val_ds.map(preprocess, remove_columns=val_ds.column_names, num_proc=1)
+    train_ds = train_ds.map(preprocess, remove_columns=train_ds.column_names, num_proc=1, load_from_cache_file=False)
+    val_ds = val_ds.map(preprocess, remove_columns=val_ds.column_names, num_proc=1, load_from_cache_file=False)
     
     # Debug: print columns after preprocessing
     print(f"   Dataset columns after preprocess: {train_ds.column_names}")
