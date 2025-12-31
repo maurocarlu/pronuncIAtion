@@ -128,13 +128,15 @@ class DataCollatorCTCWithPadding:
     def __init__(self, processor, padding=True):
         self.processor = processor
         self.padding = padding
+        self._debug_printed = False
     
     def __call__(self, features: List[Dict]) -> Dict[str, torch.Tensor]:
         # Debug: check keys in first feature
-        if features and hasattr(self, '_debug_printed') is False:
+        if not self._debug_printed:
             self._debug_printed = True
             print(f"   [DEBUG] Feature keys: {list(features[0].keys())}")
         
+        # Convert lists back to proper format for padding
         input_features = [{"input_values": f["input_values"]} for f in features]
         label_features = [{"input_ids": f["labels"]} for f in features]
         
@@ -220,6 +222,12 @@ def train_w2v2_bert(
     model.gradient_checkpointing_enable()
     print("   ✓ Gradient checkpointing enabled")
     
+    # CRITICAL: Reinitialize lm_head to prevent CTC collapse
+    import torch.nn as nn
+    nn.init.normal_(model.lm_head.weight, mean=0.0, std=0.02)
+    nn.init.zeros_(model.lm_head.bias)
+    print("   ✓ lm_head reinitialized")
+    
     total_params = sum(p.numel() for p in model.parameters())
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"   Total params: {total_params/1e6:.1f}M")
@@ -256,14 +264,14 @@ def train_w2v2_bert(
     def preprocess(batch):
         audio, sr = librosa.load(batch["audio_path"], sr=16000)
         inputs = processor(audio, sampling_rate=16000, return_tensors=None)
-        input_values = inputs.input_values[0]
+        # Convert to list to avoid datasets serialization issues with large numpy arrays
+        input_values = inputs.input_values[0].tolist() if hasattr(inputs.input_values[0], 'tolist') else list(inputs.input_values[0])
         labels = processor.tokenizer(batch["ipa_clean"]).input_ids
         
         input_frames = len(input_values) // 320
         if len(labels) > input_frames:
             labels = labels[:input_frames]
         
-        # Return a new dict - required when using remove_columns with map()
         return {
             "input_values": input_values,
             "labels": labels,

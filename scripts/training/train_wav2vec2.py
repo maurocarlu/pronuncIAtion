@@ -325,6 +325,13 @@ def train_wav2vec2(
     if model.config.vocab_size != vocab_size:
         print(f"⚠️ CRITICAL: Model vocab size mismatch! {model.config.vocab_size} != {vocab_size}")
     print(f"   Pad Token ID (used as CTC Blank): {model.config.pad_token_id}")
+    
+    # CRITICAL: Reinitialize lm_head to prevent CTC collapse
+    # The pretrained lm_head has wrong vocab size and bad initialization
+    import torch.nn as nn
+    nn.init.normal_(model.lm_head.weight, mean=0.0, std=0.02)
+    nn.init.zeros_(model.lm_head.bias)
+    print("   ✓ lm_head reinitialized")
 
     
     # Freeze feature encoder
@@ -377,7 +384,8 @@ def train_wav2vec2(
         inputs = processor(
             audio, sampling_rate=16000, return_tensors=None
         )
-        input_values = inputs.input_values[0]
+        # Convert to list to avoid datasets serialization issues with large numpy arrays
+        input_values = inputs.input_values[0].tolist() if hasattr(inputs.input_values[0], 'tolist') else list(inputs.input_values[0])
         labels = processor.tokenizer(batch["ipa_clean"]).input_ids
         
         # CRITICAL: CTC requires input_length > label_length
@@ -387,7 +395,6 @@ def train_wav2vec2(
             # Truncate labels if too long
             labels = labels[:input_frames]
         
-        # Return a new dict - required when using remove_columns with map()
         return {
             "input_values": input_values,
             "labels": labels,
