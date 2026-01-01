@@ -35,21 +35,7 @@ HuBERT impara mappando l'audio continuo a cluster discreti. Questo forza il mode
 
 ---
 
-## 3. Wav2Vec 2.0 (Large)
-
-| Parametro | Valore |
-|-----------|--------|
-| **Backbone** | `facebook/wav2vec2-large-960h-lv60-self` |
-| **Parametri** | ~317M |
-| **Pre-training** | Contrastive Learning (Quantized vector selection) |
-
-### Caratteristiche
-Predecessore di HuBERT e WavLM. Usa una loss contrastiva per distinguere la vera rappresentazione quantizzata da distrattori.
-**Motivazione nel Benchmark**: Serve per isolare l'effetto dei pre-training più avanzati (HuBERT/WavLM).
-
----
-
-## 4. XLS-R (300M)
+## 3. XLS-R (300M)
 
 | Parametro | Valore |
 |-----------|--------|
@@ -133,7 +119,29 @@ Combina il contrastive learning di Wav2Vec2 con MLM di BERT.
 
 ---
 
-## 9. Baseline MLP (Linear Probe)
+## 9. MMS (Massively Multilingual Speech)
+
+| Parametro | Valore |
+|-----------|--------|
+| **Backbone** | `facebook/mms-1b-all` |
+| **Parametri** | ~1B |
+| **Pre-training** | 1000+ lingue, contrastive learning |
+| **VRAM** | ~16GB (FP16) o ~8GB (4-bit) |
+
+### Caratteristiche
+MMS è un modello massiccio (1 miliardo di parametri) addestrato su oltre 1000 lingue.
+Usa adapter per lingua, ma qui lo usiamo con CTC head custom sul nostro vocab IPA.
+
+### Configurazione
+- **FP16**: Obbligatorio per VRAM
+- **4-bit quantization**: Opzionale per GPU con <16GB VRAM
+- **Batch Size**: 8 (con FP16)
+
+**Motivazione**: Testare se il pre-training multilingue massivo migliora il riconoscimento fonetico.
+
+---
+
+## 10. Baseline MLP (Linear Probe)
 
 | Parametro | Valore |
 |-----------|--------|
@@ -152,10 +160,10 @@ Modello "stupido" di controllo. Se un classificatore semplice su feature medie f
 |---------|--------|---------------|------|--------|
 | WavLM Large | 317M | Fine-tuning | ~12GB | - |
 | HuBERT Large | 317M | Fine-tuning | ~12GB | - |
-| Wav2Vec2 Large | 317M | Fine-tuning | ~12GB | `train_wav2vec2.py` |
 | XLS-R 300M | 300M | Fine-tuning | ~10GB | - |
 | Whisper Small (Encoder) | 244M | Partial Fine-tuning | ~8GB | `train_whisper_encoder.py` |
 | SpeechTokenizer | 256K train | 2-Stage (Classifier) | ~4GB | `train_speechtokenizer.py` |
 | **Qwen2-Audio** | **260K train** | **Linear Probe** | **~5GB** | `train_qwen_audio.py` |
 | **Wav2Vec2-BERT** | **600M** | **Fine-tuning** | **~12GB** | `train_w2v2_bert.py` |
+| **MMS 1B** | **1B** | **Fine-tuning** | **~16GB** | `train_mms.py` |
 | Baseline MLP | 2M train | Linear Probe | ~4GB | `train_baseline_mlp.py` |

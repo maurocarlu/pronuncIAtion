@@ -144,6 +144,55 @@ class DriveBackupCallback(TrainerCallback):
 
 
 # =============================================================================
+# PREDICTION MONITOR CALLBACK
+# =============================================================================
+
+class PredictionMonitorCallback(TrainerCallback):
+    """Stampa predizione esempio ogni N step per monitorare blank collapse."""
+    
+    def __init__(self, tokenizer, eval_dataset, print_every: int = 500):
+        self.tokenizer = tokenizer
+        self.eval_dataset = eval_dataset
+        self.print_every = print_every
+    
+    def on_step_end(self, args, state, control, model=None, **kwargs):
+        if state.global_step % self.print_every == 0 and state.global_step > 0:
+            if model is None:
+                return
+            try:
+                model.eval()
+                # Sample one example from eval set
+                sample = self.eval_dataset[0]
+                input_features = sample["input_features"]
+                if isinstance(input_features, list):
+                    input_features = np.array(input_features)
+                input_features = torch.tensor(input_features, device=next(model.parameters()).device).unsqueeze(0)
+                
+                with torch.no_grad():
+                    outputs = model(input_features)
+                    logits = outputs["logits"]
+                
+                pred_ids = torch.argmax(logits, dim=-1)[0]
+                pred_str = self.tokenizer.decode(pred_ids, skip_special_tokens=True)
+                
+                # Get actual label
+                label_ids = [i for i in sample["labels"] if i != -100]
+                label_str = self.tokenizer.decode(label_ids, skip_special_tokens=True)
+                
+                print(f"\n📊 [Step {state.global_step}] Sample Prediction:")
+                print(f"   Target: {label_str[:50]}{'...' if len(label_str) > 50 else ''}")
+                print(f"   Pred:   {pred_str[:50]}{'...' if len(pred_str) > 50 else ''}")
+                
+                # Check for blank collapse
+                if len(pred_str.strip()) == 0:
+                    print("   ⚠️ WARNING: Empty prediction - possible blank collapse!")
+                
+                model.train()
+            except Exception as e:
+                print(f"\n⚠️ Prediction monitor error: {e}")
+
+
+# =============================================================================
 # QWEN2-AUDIO ENCODER + CTC
 # =============================================================================
 
@@ -544,7 +593,7 @@ def train_qwen_audio(
         eval_dataset=val_ds,
         compute_metrics=compute_metrics,
         data_collator=data_collator,
-        callbacks=[DriveBackupCallback()],
+        callbacks=[DriveBackupCallback(), PredictionMonitorCallback(tokenizer, val_ds, print_every=500)],
     )
     
     # Resume

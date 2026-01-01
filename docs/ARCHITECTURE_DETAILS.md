@@ -166,7 +166,7 @@ logits = self.ctc_head(hidden)  # Solo questo layer apprende
 
 ---
 
-## 5. Wav2Vec2-BERT 2.0
+## 5. Wav2Vec2-BERT 2.0 (Recommended)
 
 ### 🔬 Innovazione
 W2V-BERT 2.0 combina il **contrastive learning** di Wav2Vec2 con la **masked language modeling** di BERT, ottenendo rappresentazioni audio più ricche e contestualizzate.
@@ -218,4 +218,122 @@ fused = weight * lA + (1 - weight) * lB
 ```
 
 Questa operazione è sicura perché le differenze sono solo nei bordi di silenzio.
+
+---
+
+## 7. CTC Head Architectures - Confronto Dettagliato
+
+### 🎯 Panoramica
+
+Ogni modello nel benchmark usa una CTC (Connectionist Temporal Classification) head per mappare le rappresentazioni audio ai fonemi IPA. Le architetture variano in base alla **natura dell'input** (continuo vs discreto) e alla **ricchezza contestuale** dell'encoder.
+
+### 📊 Tabella Comparativa
+
+| Modello | Input alla Head | Architettura CTC Head | Params Head | Motivazione |
+|---------|-----------------|----------------------|-------------|-------------|
+| **W2V-BERT 2.0** | Vettori 1024D | `Linear(1024 → 43)` | ~44K | Encoder già contestualizzato |
+| **MMS 1B** | Vettori 1024D | `Linear(1024 → 43)` | ~44K | Identico a W2V-BERT |
+| **Whisper** | Vettori 768D | `Dropout(0.1) → Linear(768 → 43)` | ~33K | Regularizzazione aggiuntiva |
+| **Qwen2-Audio** | Vettori 1280D | `Linear(1280→512) → GELU → Dropout(0.1) → Linear(512→43)` | ~680K | MLP più espressivo per linear probe |
+| **SpeechTokenizer** | Indici discreti 0-1023 | `Embedding → Transformer(2L) → Linear` | ~1.4M | Token discreti richiedono contestualizzazione |
+
+### 🔬 Dettagli Implementativi
+
+#### W2V-BERT 2.0 / MMS (Pretrained Head)
+
+```python
+# Head built-in da HuggingFace
+self.lm_head = nn.Linear(hidden_size, vocab_size)  # 1024 → 43
+```
+
+**⚠️ Fix Critico - Reinizializzazione lm_head:**
+
+Il checkpoint pretrained ha `lm_head` con shape diversa (vocab originale ≠ nostro IPA vocab). HuggingFace la reinizializza random, ma la distribuzione può causare **CTC collapse** (il modello predice solo blank token).
+
+```python
+# Reinizializzazione esplicita per prevenire collapse
+nn.init.normal_(model.lm_head.weight, mean=0.0, std=0.02)
+nn.init.zeros_(model.lm_head.bias)
+```
+
+Questa inizializzazione con std=0.02 (stile BERT) assicura che i logits iniziali siano bilanciati tra tutti i token, evitando il minimo locale dove il modello predice solo blank.
+
+---
+
+#### Whisper Encoder (Custom Head)
+
+```python
+class WhisperEncoderForCTC(nn.Module):
+    def __init__(self, vocab_size):
+        # ...
+        hidden_size = 768  # whisper-small
+        self.dropout = nn.Dropout(0.1)
+        self.lm_head = nn.Linear(hidden_size, vocab_size)
+```
+
+**Motivazione Dropout**: Whisper encoder è molto potente e tende a overfittare rapidamente. Il dropout aggiuntivo prima della proiezione aiuta la generalizzazione.
+
+---
+
+#### Qwen2-Audio (MLP Head)
+
+```python
+self.ctc_head = nn.Sequential(
+    nn.Linear(1280, 512),   # Riduzione dimensionalità
+    nn.GELU(),              # Non-linearità
+    nn.Dropout(0.1),        # Regularizzazione
+    nn.Linear(512, vocab_size),
+)
+```
+
+**Motivazione MLP a 2 Layer**:
+1. **Linear Probe Mode**: L'encoder è completamente frozen, quindi la head deve compensare con maggiore capacità
+2. **Bottleneck 512**: Riduce da 1280 a 512, forzando una compressione delle feature
+3. **GELU**: Attivazione smoother di ReLU, migliora gradient flow
+4. **680K params**: Abbastanza espressiva per adattarsi al task senza fine-tuning dell'encoder
+
+---
+
+#### SpeechTokenizer (Transformer Head)
+
+```python
+class DiscreteTokenClassifier(nn.Module):
+    def __init__(self, vocab_size, codebook_size=1024, embed_dim=256):
+        # 1. Embedding per token discreti
+        self.embedding = nn.Embedding(codebook_size, embed_dim)  # 1024 → 256
+        
+        # 2. Positional Encoding apprendibile
+        self.pos_encoding = nn.Parameter(torch.zeros(1, 2048, embed_dim))
+        
+        # 3. Transformer leggero
+        self.transformer = nn.TransformerEncoder(
+            nn.TransformerEncoderLayer(d_model=256, nhead=4, dim_feedforward=1024),
+            num_layers=2
+        )
+        
+        # 4. CTC projection
+        self.lm_head = nn.Linear(embed_dim, vocab_size)
+```
+
+**Motivazione Architettura Complessa**:
+
+| Componente | Perché è Necessario |
+|------------|---------------------|
+| **Embedding** | I token RVQ sono indici interi (0-1023), non vettori - serve trasformarli in spazio continuo |
+| **Positional Encoding** | I codici discreti perdono ogni informazione temporale durante la quantizzazione RVQ |
+| **Transformer** | Senza un encoder contestuale, i singoli token non sanno nulla dei token adiacenti - il Transformer ricostruisce il contesto |
+| **2 Layer** | Compromesso tra capacità e velocità - sufficiente per modellare dipendenze locali fonetiche |
+
+---
+
+### 🧪 Considerazioni Sperimentali
+
+1. **CTC Collapse**: Se `loss ≈ 0` e `grad_norm = nan`, la head sta predicendo solo blank. Soluzioni:
+   - Reinizializzare lm_head con std=0.02
+   - Ridurre learning rate (5e-6 invece di 3e-4)
+   - Aumentare warmup steps
+
+2. **Dimensionalità**: Head più grandi (Qwen, SpeechTokenizer) richiedono più dati per non overfittare
+
+3. **Regularizzazione**: Dropout 0.1 è standard, aumentare a 0.2-0.3 se si nota overfitting
 

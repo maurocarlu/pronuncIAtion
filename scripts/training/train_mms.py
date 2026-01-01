@@ -1,22 +1,26 @@
 #!/usr/bin/env python3
 """
-Training script per Wav2Vec2-BERT 2.0 con CTC.
+Training script per MMS (Massively Multilingual Speech) con CTC.
 
 =============================================================================
 MOTIVAZIONE SCIENTIFICA
 =============================================================================
 
-W2V-BERT 2.0 combina la masked language modeling di BERT con il
-contrastive learning di Wav2Vec2, ottenendo rappresentazioni audio
-più ricche.
+MMS (Massively Multilingual Speech) è un modello da 1B di parametri addestrato
+su 1000+ lingue. Usa un approccio adapter-based per gestire le diverse lingue.
 
-MODELLO: facebook/w2v-bert-2.0
-- 24 Transformer layers, 1024 hidden dimension
-- ~600M parametri
-- SOTA su LibriSpeech
+Per il benchmark fonetico generale, usiamo il modello base (mms-1b-all) con
+una CTC head custom usando il nostro vocab.json IPA.
+
+MODELLO: facebook/mms-1b-all
+- ~1B parametri
+- Pre-training su 1000+ lingue
+- SOTA per ASR
+
+NOTA: Richiede FP16 obbligatorio per VRAM. Opzione 4-bit per GPU con <16GB.
 
 Uso:
-    python scripts/training/train_w2v2_bert.py --epochs 10
+    python scripts/training/train_mms.py --epochs 10
 """
 
 import argparse
@@ -27,6 +31,7 @@ from pathlib import Path
 from typing import Dict, Any, List
 
 import torch
+import torch.nn as nn
 import numpy as np
 import evaluate
 from datasets import load_dataset
@@ -34,10 +39,11 @@ from transformers import (
     Wav2Vec2Processor,
     Wav2Vec2CTCTokenizer,
     Wav2Vec2FeatureExtractor,
-    Wav2Vec2BertForCTC,
+    Wav2Vec2ForCTC,
     TrainingArguments,
     Trainer,
     TrainerCallback,
+    BitsAndBytesConfig,
 )
 import shutil
 
@@ -176,12 +182,10 @@ class DataCollatorCTCWithPadding:
         self._debug_printed = False
     
     def __call__(self, features: List[Dict]) -> Dict[str, torch.Tensor]:
-        # Debug: check keys in first feature
         if not self._debug_printed:
             self._debug_printed = True
             print(f"   [DEBUG] Feature keys: {list(features[0].keys())}")
         
-        # Convert lists back to proper format for padding
         input_features = [{"input_values": f["input_values"]} for f in features]
         label_features = [{"input_ids": f["labels"]} for f in features]
         
@@ -202,24 +206,25 @@ class DataCollatorCTCWithPadding:
 # TRAINING
 # =============================================================================
 
-def train_w2v2_bert(
+def train_mms(
     csv_path: str,
     vocab_path: str,
     output_dir: str,
     audio_base_path: str = ".",
     epochs: int = 10,
-    batch_size: int = 4,
-    learning_rate: float = 5e-6,  # Very conservative to prevent CTC collapse
+    batch_size: int = 8,  # FP16 allows larger batches
+    learning_rate: float = 1e-5,  # Conservative for 1B model
     resume: bool = False,
+    use_4bit: bool = False,  # 4-bit quantization for limited VRAM
 ):
-    """Training Wav2Vec2-BERT 2.0 con CTC."""
+    """Training MMS con CTC per phoneme recognition."""
     
     print("=" * 60)
-    print("TRAINING WAV2VEC2-BERT 2.0")
+    print("TRAINING MMS (Massively Multilingual Speech)")
     print("=" * 60)
     
-    # Setup processor
-    print("\n📦 Setup processor...")
+    # Setup processor with OUR vocab (not MMS's adapters)
+    print("\n📦 Setup processor with custom IPA vocab...")
     tokenizer = Wav2Vec2CTCTokenizer(
         vocab_path,
         unk_token="[UNK]",
@@ -243,39 +248,54 @@ def train_w2v2_bert(
     )
     
     vocab_size = len(tokenizer)
-    print(f"   Vocab size: {vocab_size}")
+    print(f"   Custom IPA vocab size: {vocab_size}")
     
     # Load model
-    print("\n📦 Caricamento Wav2Vec2-BERT 2.0...")
-    model = Wav2Vec2BertForCTC.from_pretrained(
-        "facebook/w2v-bert-2.0",
-        vocab_size=vocab_size,
-        ctc_loss_reduction="mean",
-        ctc_zero_infinity=True,
-        pad_token_id=tokenizer.pad_token_id,
-        ignore_mismatched_sizes=True,
-    )
+    print("\n📦 Loading MMS-1B-all...")
     
-    # Freeze feature projection (Wav2Vec2-BERT doesn't have freeze_feature_encoder)
-    if hasattr(model, 'wav2vec2_bert'):
-        for param in model.wav2vec2_bert.feature_projection.parameters():
-            param.requires_grad = False
-        print("   ✓ Feature projection frozen")
+    # Setup quantization if needed
+    if use_4bit:
+        print("   ⚡ Using 4-bit quantization for limited VRAM")
+        bnb_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.float16,
+        )
+        model = Wav2Vec2ForCTC.from_pretrained(
+            "facebook/mms-1b-all",
+            quantization_config=bnb_config,
+            vocab_size=vocab_size,
+            ctc_loss_reduction="mean",
+            ctc_zero_infinity=True,
+            pad_token_id=tokenizer.pad_token_id,
+            ignore_mismatched_sizes=True,
+        )
     else:
-        print("   ⚠️ Could not find wav2vec2_bert module to freeze")
+        model = Wav2Vec2ForCTC.from_pretrained(
+            "facebook/mms-1b-all",
+            vocab_size=vocab_size,
+            ctc_loss_reduction="mean",
+            ctc_zero_infinity=True,
+            pad_token_id=tokenizer.pad_token_id,
+            ignore_mismatched_sizes=True,
+        )
+    
+    # Freeze feature encoder for stability
+    model.freeze_feature_encoder()
+    print("   ✓ Feature encoder frozen")
     
     model.gradient_checkpointing_enable()
     print("   ✓ Gradient checkpointing enabled")
     
     # CRITICAL: Reinitialize lm_head to prevent CTC collapse
-    import torch.nn as nn
+    # MMS has adapters for different languages - we replace lm_head with our vocab
     nn.init.normal_(model.lm_head.weight, mean=0.0, std=0.02)
     nn.init.zeros_(model.lm_head.bias)
-    print("   ✓ lm_head reinitialized")
+    print("   ✓ lm_head reinitialized for custom IPA vocab")
     
     total_params = sum(p.numel() for p in model.parameters())
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"   Total params: {total_params/1e6:.1f}M")
+    print(f"   Total params: {total_params/1e9:.2f}B")
     print(f"   Trainable: {trainable/1e6:.1f}M")
     
     # Load dataset
@@ -309,7 +329,6 @@ def train_w2v2_bert(
     def preprocess(batch):
         audio, sr = librosa.load(batch["audio_path"], sr=16000)
         inputs = processor(audio, sampling_rate=16000, return_tensors=None)
-        # Convert to list to avoid datasets serialization issues with large numpy arrays
         input_values = inputs.input_values[0].tolist() if hasattr(inputs.input_values[0], 'tolist') else list(inputs.input_values[0])
         labels = processor.tokenizer(batch["ipa_clean"]).input_ids
         
@@ -332,7 +351,6 @@ def train_w2v2_bert(
     train_ds = train_ds.map(preprocess, remove_columns=train_ds.column_names, num_proc=1, load_from_cache_file=False)
     val_ds = val_ds.map(preprocess, remove_columns=val_ds.column_names, num_proc=1, load_from_cache_file=False)
     
-    # Debug: print columns after preprocessing
     print(f"   Dataset columns after preprocess: {train_ds.column_names}")
     
     train_ds = train_ds.filter(lambda x: x["label_length"] > 0 and x["label_length"] < x["input_length"] // 320)
@@ -360,8 +378,8 @@ def train_w2v2_bert(
         per_device_eval_batch_size=batch_size,
         gradient_accumulation_steps=4,
         learning_rate=learning_rate,
-        warmup_steps=2000,  # Extended warmup to prevent CTC collapse
-        weight_decay=0.001,  # Lower weight decay
+        warmup_steps=2000,  # Extended warmup for 1B model
+        weight_decay=0.001,
         logging_steps=50,
         eval_strategy="steps",
         eval_steps=500,
@@ -371,8 +389,8 @@ def train_w2v2_bert(
         load_best_model_at_end=True,
         metric_for_best_model="cer",
         greater_is_better=False,
-        fp16=True,  # Enabled for VRAM efficiency - stable with proper warmup
-        bf16=False,  # Disable bf16 when using fp16
+        fp16=True,  # Required for 1B model
+        bf16=False,
         dataloader_num_workers=0,
         group_by_length=False,
         gradient_checkpointing=True,
@@ -410,19 +428,20 @@ def train_w2v2_bert(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train Wav2Vec2-BERT 2.0")
+    parser = argparse.ArgumentParser(description="Train MMS (Massively Multilingual Speech)")
     parser.add_argument("--data-csv", type=str, default="data/processed/combined_augmented.csv")
     parser.add_argument("--vocab-path", type=str, default="data/processed/vocab.json")
     parser.add_argument("--audio-base", type=str, default=".")
-    parser.add_argument("--output-dir", type=str, default="outputs/w2v2_bert")
+    parser.add_argument("--output-dir", type=str, default="outputs/mms")
     parser.add_argument("--epochs", type=int, default=10)
-    parser.add_argument("--batch-size", type=int, default=8)  # Increased for FP16 stability
-    parser.add_argument("--learning-rate", type=float, default=5e-6)  # Conservative LR to prevent CTC collapse
+    parser.add_argument("--batch-size", type=int, default=8)  # FP16 allows larger batches
+    parser.add_argument("--learning-rate", type=float, default=1e-5)  # Conservative for 1B model
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--use-4bit", action="store_true", help="Use 4-bit quantization for limited VRAM")
     
     args = parser.parse_args()
     
-    train_w2v2_bert(
+    train_mms(
         csv_path=args.data_csv,
         vocab_path=args.vocab_path,
         output_dir=args.output_dir,
@@ -431,10 +450,11 @@ def main():
         batch_size=args.batch_size,
         learning_rate=args.learning_rate,
         resume=args.resume,
+        use_4bit=args.use_4bit,
     )
     
     print("\n" + "=" * 60)
-    print("✓ Wav2Vec2-BERT training complete!")
+    print("✓ MMS training complete!")
     print("=" * 60)
 
 
