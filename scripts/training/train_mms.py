@@ -325,11 +325,14 @@ def train_mms(
     
     # Preprocess
     import librosa
+    from datasets import Features, Sequence, Value
     
     def preprocess(batch):
         audio, sr = librosa.load(batch["audio_path"], sr=16000)
         inputs = processor(audio, sampling_rate=16000, return_tensors=None)
-        input_values = inputs.input_values[0].tolist() if hasattr(inputs.input_values[0], 'tolist') else list(inputs.input_values[0])
+        input_values = inputs.input_values[0]
+        if hasattr(input_values, 'tolist'):
+            input_values = input_values.tolist()
         labels = processor.tokenizer(batch["ipa_clean"]).input_ids
         
         input_frames = len(input_values) // 320
@@ -348,8 +351,28 @@ def train_mms(
     train_ds = train_ds.remove_columns(cols)
     val_ds = val_ds.remove_columns(cols)
     
-    train_ds = train_ds.map(preprocess, remove_columns=train_ds.column_names, num_proc=1, load_from_cache_file=False)
-    val_ds = val_ds.map(preprocess, remove_columns=val_ds.column_names, num_proc=1, load_from_cache_file=False)
+    # Define output features explicitly for proper Arrow serialization
+    output_features = Features({
+        "input_values": Sequence(Value("float32")),
+        "labels": Sequence(Value("int32")),
+        "input_length": Value("int64"),
+        "label_length": Value("int64"),
+    })
+    
+    train_ds = train_ds.map(
+        preprocess, 
+        remove_columns=train_ds.column_names, 
+        num_proc=1, 
+        load_from_cache_file=False,
+        features=output_features,
+    )
+    val_ds = val_ds.map(
+        preprocess, 
+        remove_columns=val_ds.column_names, 
+        num_proc=1, 
+        load_from_cache_file=False,
+        features=output_features,
+    )
     
     print(f"   Dataset columns after preprocess: {train_ds.column_names}")
     
