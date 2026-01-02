@@ -33,7 +33,7 @@ from datasets import load_dataset
 from transformers import (
     Wav2Vec2Processor,
     Wav2Vec2CTCTokenizer,
-    Wav2Vec2FeatureExtractor,
+    SeamlessM4TFeatureExtractor,  # Correct extractor for W2V-BERT 2.0 (log-mel spectrograms)
     Wav2Vec2BertForCTC,
     TrainingArguments,
     Trainer,
@@ -229,12 +229,10 @@ def train_w2v2_bert(
         eos_token=None,
     )
     
-    feature_extractor = Wav2Vec2FeatureExtractor(
-        feature_size=1,
-        sampling_rate=16000,
-        padding_value=0.0,
-        do_normalize=True,
-        return_attention_mask=True,
+    # SeamlessM4TFeatureExtractor generates 80-bin log-mel spectrograms (input_features)
+    # This is required for W2V-BERT 2.0 which expects spectrograms, not raw audio
+    feature_extractor = SeamlessM4TFeatureExtractor.from_pretrained(
+        "facebook/w2v-bert-2.0"
     )
     
     processor = Wav2Vec2Processor(
@@ -316,8 +314,10 @@ def train_w2v2_bert(
             input_features = input_features.tolist()
         labels = processor.tokenizer(batch["ipa_clean"]).input_ids
         
+        # input_len is now the number of spectrogram frames (not raw audio samples)
         input_len = len(input_features)
-        input_frames = input_len // 320
+        # W2V-BERT 2.0 has a temporal subsampling factor of 2 for spectrograms
+        input_frames = input_len // 2
         if len(labels) > input_frames:
             labels = labels[:input_frames]
         
@@ -357,13 +357,14 @@ def train_w2v2_bert(
         raise RuntimeError("input_features column missing after preprocessing!")
     
     # Filter with cache disabled
+    # Filter uses subsampling factor of 2 for spectrograms (not 320 for raw audio)
     train_ds = train_ds.filter(
-        lambda x: x["label_length"] > 0 and x["label_length"] < x["input_length"] // 320,
+        lambda x: x["label_length"] > 0 and x["label_length"] < x["input_length"] // 2,
         load_from_cache_file=False,
         keep_in_memory=True,
     )
     val_ds = val_ds.filter(
-        lambda x: x["label_length"] > 0 and x["label_length"] < x["input_length"] // 320,
+        lambda x: x["label_length"] > 0 and x["label_length"] < x["input_length"] // 2,
         load_from_cache_file=False,
         keep_in_memory=True,
     )
