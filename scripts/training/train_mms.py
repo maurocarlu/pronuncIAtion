@@ -425,6 +425,7 @@ def train_mms(
         gradient_checkpointing=True,
         max_grad_norm=1.0,
         report_to="none",
+        remove_unused_columns=False,  # CRITICAL: Keep input_values column
     )
     
     trainer = Trainer(
