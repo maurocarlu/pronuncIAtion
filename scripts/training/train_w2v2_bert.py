@@ -140,10 +140,10 @@ class PredictionMonitorCallback(TrainerCallback):
                 model.eval()
                 # Sample one example from eval set
                 sample = self.eval_dataset[0]
-                input_values = torch.tensor([sample["input_values"]], device=model.device)
+                input_features = torch.tensor([sample["input_features"]], device=model.device)
                 
                 with torch.no_grad():
-                    logits = model(input_values).logits
+                    logits = model(input_features).logits
                 
                 pred_ids = torch.argmax(logits, dim=-1)[0]
                 pred_str = self.processor.decode(pred_ids)
@@ -181,8 +181,8 @@ class DataCollatorCTCWithPadding:
             self._debug_printed = True
             print(f"   [DEBUG] Feature keys: {list(features[0].keys())}")
         
-        # Convert lists back to proper format for padding
-        input_features = [{"input_values": f["input_values"]} for f in features]
+        # Wav2Vec2Bert uses input_features, not input_values
+        input_features = [{"input_features": f["input_features"]} for f in features]
         label_features = [{"input_ids": f["labels"]} for f in features]
         
         batch = self.processor.feature_extractor.pad(
@@ -310,20 +310,21 @@ def train_w2v2_bert(
     def preprocess(batch):
         audio, sr = librosa.load(batch["audio_path"], sr=16000)
         inputs = processor(audio, sampling_rate=16000, return_tensors=None)
-        # Keep as numpy array - datasets handles this better
-        input_values = inputs.input_values[0]
-        if hasattr(input_values, 'tolist'):
-            input_values = input_values.tolist()
+        # Wav2Vec2Bert uses input_features (not input_values)
+        input_features = inputs.input_features[0]
+        if hasattr(input_features, 'tolist'):
+            input_features = input_features.tolist()
         labels = processor.tokenizer(batch["ipa_clean"]).input_ids
         
-        input_frames = len(input_values) // 320
+        input_len = len(input_features)
+        input_frames = input_len // 320
         if len(labels) > input_frames:
             labels = labels[:input_frames]
         
         return {
-            "input_values": input_values,
+            "input_features": input_features,
             "labels": labels,
-            "input_length": len(input_values),
+            "input_length": input_len,
             "label_length": len(labels),
         }
     
@@ -351,9 +352,9 @@ def train_w2v2_bert(
     # Debug: print columns after preprocessing
     print(f"   Dataset columns after preprocess: {train_ds.column_names}")
     
-    # Verify input_values exists
-    if "input_values" not in train_ds.column_names:
-        raise RuntimeError("input_values column missing after preprocessing!")
+    # Verify input_features exists
+    if "input_features" not in train_ds.column_names:
+        raise RuntimeError("input_features column missing after preprocessing!")
     
     # Filter with cache disabled
     train_ds = train_ds.filter(
@@ -369,8 +370,8 @@ def train_w2v2_bert(
     print(f"   After filter: Train={len(train_ds)}, Val={len(val_ds)}")
     
     # Explicitly set format to ensure all columns are available
-    train_ds.set_format(type=None, columns=["input_values", "labels"])
-    val_ds.set_format(type=None, columns=["input_values", "labels"])
+    train_ds.set_format(type=None, columns=["input_features", "labels"])
+    val_ds.set_format(type=None, columns=["input_features", "labels"])
     print(f"   Format set. Sample keys: {list(train_ds[0].keys())}")
     
     # Metrics
