@@ -103,19 +103,33 @@ Modello multimodale (LLM + Audio). Estraiamo solo la "Audio Tower" pre-trainata.
 
 ---
 
-## 8. Wav2Vec2-BERT 2.0
+## 8. Wav2Vec2-BERT 2.0 (⭐ Recommended)
 
 | Parametro | Valore |
 |-----------|--------|
 | **Backbone** | `facebook/w2v-bert-2.0` |
 | **Parametri** | ~600M |
 | **Pre-training** | Contrastive + Masked Language Modeling |
+| **Input** | Log-Mel Spectrogram (80 bins) |
 | **VRAM** | ~10-12GB |
 
 ### Caratteristiche
 Combina il contrastive learning di Wav2Vec2 con MLM di BERT.
-**Training**: Fine-tuning completo (10 epochs, LR=3e-4).
-**Motivazione**: Testare se l'obiettivo MLM aggiuntivo migliora le rappresentazioni fonetiche.
+
+> **⚠️ IMPORTANTE**: A differenza di Wav2Vec2/WavLM, W2V-BERT 2.0 richiede **spettrogrammi log-mel** (`input_features`), NON audio raw (`input_values`)!
+
+### Configurazione Corretta
+| Componente | Classe |
+|------------|--------|
+| Feature Extractor | `SeamlessM4TFeatureExtractor` (non Wav2Vec2FeatureExtractor!) |
+| Processor | `Wav2Vec2BertProcessor` (non Wav2Vec2Processor!) |
+| Model | `Wav2Vec2BertForCTC` |
+
+### Training
+- **LR**: 5e-6 (conservativo per evitare CTC collapse)
+- **Warmup**: 2000 steps
+- **Freeze**: `feature_projection` (non esiste `freeze_feature_encoder()`)
+- **Subsampling**: Fattore 2 sui frame spettrogramma
 
 ---
 

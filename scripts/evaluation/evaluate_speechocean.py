@@ -75,6 +75,7 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
     is_speechtokenizer = False
     is_whisper_encoder = False
     is_qwen_audio = False
+    is_w2v_bert = False  # Wav2Vec2-BERT 2.0
     config = {}
     
     if config_path.exists():
@@ -85,9 +86,15 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
         is_speechtokenizer = config.get("model_type") == "speechtokenizer_discrete_ctc"
         is_whisper_encoder = config.get("model_type") == "whisper_encoder_ctc"
         is_qwen_audio = config.get("model_type") == "qwen2_audio_ctc"
-        # XLS-R usa architettura wav2vec2
-        is_xlsr_model = "wav2vec2" in config.get("architectures", [""])[0].lower() or \
-                        "xlsr" in str(config.get("_name_or_path", "")).lower()
+        # Wav2Vec2-BERT 2.0 detection (must come before xlsr check)
+        is_w2v_bert = config.get("model_type") == "wav2vec2-bert" or \
+                      "wav2vec2bert" in config.get("architectures", [""])[0].lower() or \
+                      "w2v-bert" in str(config.get("_name_or_path", "")).lower()
+        # XLS-R usa architettura wav2vec2 (but NOT wav2vec2-bert)
+        is_xlsr_model = (not is_w2v_bert) and (
+            "wav2vec2" in config.get("architectures", [""])[0].lower() or
+            "xlsr" in str(config.get("_name_or_path", "")).lower()
+        )
         # HuBERT detection
         is_hubert_model = config.get("model_type") == "hubert" or \
                           "hubert" in config.get("architectures", [""])[0].lower() or \
@@ -100,6 +107,10 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
     if is_speechtokenizer or is_whisper_encoder or is_qwen_audio:
         from transformers import Wav2Vec2CTCTokenizer
         processor = Wav2Vec2CTCTokenizer.from_pretrained(model_path)
+    elif is_w2v_bert:
+        # Wav2Vec2-BERT needs Wav2Vec2BertProcessor with SeamlessM4TFeatureExtractor
+        from transformers import Wav2Vec2BertProcessor
+        processor = Wav2Vec2BertProcessor.from_pretrained(model_path)
     else:
         processor = Wav2Vec2Processor.from_pretrained(model_path)
     
@@ -185,6 +196,10 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
         state_dict = torch.load(model_file, map_location="cpu")
         model.load_state_dict(state_dict)
         print(f"   ✓ Pesi caricati da: {model_file}")
+    elif is_w2v_bert:
+        print("   Tipo: Wav2Vec2BertForCTC (W2V-BERT 2.0)")
+        from transformers import Wav2Vec2BertForCTC
+        model = Wav2Vec2BertForCTC.from_pretrained(model_path)
     elif is_xlsr_model:
         print("   Tipo: Wav2Vec2ForCTC (XLS-R)")
         from transformers import Wav2Vec2ForCTC
@@ -274,7 +289,13 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
         )
         
         with torch.no_grad():
-            outputs = model(inputs.input_values)
+            # Handle different input types for different models
+            if hasattr(inputs, 'input_features') and inputs.input_features is not None:
+                # Wav2Vec2-BERT uses input_features (spectrograms)
+                outputs = model(inputs.input_features)
+            else:
+                # Standard Wav2Vec2/WavLM uses input_values (raw audio)
+                outputs = model(inputs.input_values)
             # Handle both dict (custom model) and object (standard model)
             if isinstance(outputs, dict):
                 logits = outputs["logits"]

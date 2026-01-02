@@ -171,9 +171,19 @@ logits = self.ctc_head(hidden)  # Solo questo layer apprende
 ### 🔬 Innovazione
 W2V-BERT 2.0 combina il **contrastive learning** di Wav2Vec2 con la **masked language modeling** di BERT, ottenendo rappresentazioni audio più ricche e contestualizzate.
 
+### ⚠️ Differenza Chiave da Wav2Vec2
+**W2V-BERT 2.0 NON usa audio raw!** Richiede **spettrogrammi log-mel a 80 bin** come input, a differenza di Wav2Vec2/WavLM che lavorano su waveform grezze.
+
+| Aspetto | Wav2Vec2 | W2V-BERT 2.0 |
+|---------|----------|---------------|
+| **Input** | Raw audio (`input_values`) | Log-mel spectrogram (`input_features`) |
+| **Feature Extractor** | `Wav2Vec2FeatureExtractor` | `SeamlessM4TFeatureExtractor` |
+| **Processor** | `Wav2Vec2Processor` | `Wav2Vec2BertProcessor` |
+| **Subsampling Factor** | 320 (campioni audio) | 2 (frame spettrogramma) |
+
 ### 🛠️ Architettura
 ```
-Raw Audio (16kHz) → Feature Encoder → Transformer (24 layers) → CTC Head
+Audio 16kHz → SeamlessM4TFeatureExtractor → Log-Mel (80 bins) → Transformer (24L) → CTC Head
 ```
 
 **Modello**: `facebook/w2v-bert-2.0`
@@ -181,21 +191,61 @@ Raw Audio (16kHz) → Feature Encoder → Transformer (24 layers) → CTC Head
 - ~600M parametri totali
 - SOTA su LibriSpeech
 
-#### Implementazione
+### Implementazione Corretta
 ```python
-from transformers import Wav2Vec2BertForCTC
+from transformers import (
+    Wav2Vec2BertProcessor,
+    Wav2Vec2BertForCTC,
+    SeamlessM4TFeatureExtractor,
+    Wav2Vec2CTCTokenizer,
+)
 
+# Feature extractor per spettrogrammi log-mel (NON Wav2Vec2FeatureExtractor!)
+feature_extractor = SeamlessM4TFeatureExtractor.from_pretrained("facebook/w2v-bert-2.0")
+
+# Tokenizer IPA custom
+tokenizer = Wav2Vec2CTCTokenizer(vocab_path, unk_token="[UNK]", pad_token="[PAD]")
+
+# Processor che combina entrambi
+processor = Wav2Vec2BertProcessor(feature_extractor=feature_extractor, tokenizer=tokenizer)
+
+# Modello CTC
 model = Wav2Vec2BertForCTC.from_pretrained(
     "facebook/w2v-bert-2.0",
-    vocab_size=45,  # IPA vocab
+    vocab_size=45,
     ctc_loss_reduction="mean",
     ignore_mismatched_sizes=True,
 )
-model.freeze_feature_encoder()  # Stabilità training
+
+# ⚠️ W2V-BERT non ha freeze_feature_encoder()! Usare:
+for param in model.wav2vec2_bert.feature_projection.parameters():
+    param.requires_grad = False
+
 model.gradient_checkpointing_enable()  # Riduce VRAM
+
+# ⚠️ CRITICO: Reinizializzare lm_head per evitare CTC collapse
+nn.init.normal_(model.lm_head.weight, mean=0.0, std=0.02)
+nn.init.zeros_(model.lm_head.bias)
 ```
 
-**Differenza da Wav2Vec2**: L'obiettivo MLM aggiuntivo migliora la comprensione contestuale, potenzialmente utile per fonemi co-articolati.
+### Preprocessing Audio
+```python
+def preprocess(batch):
+    audio, sr = librosa.load(batch["audio_path"], sr=16000)
+    
+    # Il processor genera automaticamente spettrogrammi log-mel
+    inputs = processor(audio, sampling_rate=16000, return_tensors=None)
+    
+    # ⚠️ Usare input_features (spettrogramma), NON input_values (audio raw)
+    input_features = inputs.input_features[0]
+    
+    # Subsampling: W2V-BERT usa fattore 2 sui frame spettrogramma
+    input_frames = len(input_features) // 2
+    
+    return {"input_features": input_features, "labels": labels}
+```
+
+**Differenza da Wav2Vec2**: L'obiettivo MLM aggiuntivo migliora la comprensione contestuale, utile per fonemi co-articolati.
 
 ---
 
@@ -231,7 +281,7 @@ Ogni modello nel benchmark usa una CTC (Connectionist Temporal Classification) h
 
 | Modello | Input alla Head | Architettura CTC Head | Params Head | Motivazione |
 |---------|-----------------|----------------------|-------------|-------------|
-| **W2V-BERT 2.0** | Vettori 1024D | `Linear(1024 → 43)` | ~44K | Encoder già contestualizzato |
+| **W2V-BERT 2.0** | Vettori 1024D (da log-mel) | `Linear(1024 → 43)` | ~44K | Encoder già contestualizzato |
 | **MMS 1B** | Vettori 1024D | `Linear(1024 → 43)` | ~44K | Identico a W2V-BERT |
 | **Whisper** | Vettori 768D | `Dropout(0.1) → Linear(768 → 43)` | ~33K | Regularizzazione aggiuntiva |
 | **Qwen2-Audio** | Vettori 1280D | `Linear(1280→512) → GELU → Dropout(0.1) → Linear(512→43)` | ~680K | MLP più espressivo per linear probe |
@@ -326,14 +376,4 @@ class DiscreteTokenClassifier(nn.Module):
 
 ---
 
-### 🧪 Considerazioni Sperimentali
-
-1. **CTC Collapse**: Se `loss ≈ 0` e `grad_norm = nan`, la head sta predicendo solo blank. Soluzioni:
-   - Reinizializzare lm_head con std=0.02
-   - Ridurre learning rate (5e-6 invece di 3e-4)
-   - Aumentare warmup steps
-
-2. **Dimensionalità**: Head più grandi (Qwen, SpeechTokenizer) richiedono più dati per non overfittare
-
-3. **Regularizzazione**: Dropout 0.1 è standard, aumentare a 0.2-0.3 se si nota overfitting
 

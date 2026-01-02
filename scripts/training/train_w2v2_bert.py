@@ -53,7 +53,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 class DriveBackupCallback(TrainerCallback):
     """Copia checkpoint su Drive. Mantiene solo gli ultimi 2."""
     
-    def __init__(self, backup_dir: str = None, keep_last: int = 2):
+    def __init__(self, backup_dir: str = None, keep_last: int = 3):
+        """Keep last 3 checkpoints by default for safety."""
         self.backup_dir = backup_dir
         self.keep_last = keep_last
         if '/content' in os.getcwd() or 'COLAB_GPU' in os.environ:
@@ -80,7 +81,10 @@ class DriveBackupCallback(TrainerCallback):
                     m = re.search(r'checkpoint-(\d+)', p)
                     return int(m.group(1)) if m else 0
                 backups.sort(key=get_step)
-                for old in backups[:-self.keep_last]:
+                to_delete = backups[:-self.keep_last]
+                to_keep = backups[-self.keep_last:]
+                print(f"   🗑️ Cleanup: keeping {[Path(p).name for p in to_keep]}, deleting {[Path(p).name for p in to_delete]}")
+                for old in to_delete:
                     try: os.remove(old)
                     except: pass
         elif self.env == 'colab':
@@ -93,7 +97,10 @@ class DriveBackupCallback(TrainerCallback):
                         m = re.search(r'checkpoint-(\d+)', str(p))
                         return int(m.group(1)) if m else 0
                     checkpoints.sort(key=get_step)
-                    for old in checkpoints[:-self.keep_last]:
+                    to_delete = checkpoints[:-self.keep_last]
+                    to_keep = checkpoints[-self.keep_last:]
+                    print(f"   🗑️ Cleanup: keeping {[p.name for p in to_keep]}, deleting {[p.name for p in to_delete]}")
+                    for old in to_delete:
                         try: shutil.rmtree(old)
                         except: pass
     
