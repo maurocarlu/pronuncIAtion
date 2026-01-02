@@ -31,7 +31,7 @@ import numpy as np
 import evaluate
 from datasets import load_dataset
 from transformers import (
-    Wav2Vec2Processor,
+    Wav2Vec2BertProcessor,  # Use BERT-specific processor (compatible with SeamlessM4TFeatureExtractor)
     Wav2Vec2CTCTokenizer,
     SeamlessM4TFeatureExtractor,  # Correct extractor for W2V-BERT 2.0 (log-mel spectrograms)
     Wav2Vec2BertForCTC,
@@ -235,7 +235,7 @@ def train_w2v2_bert(
         "facebook/w2v-bert-2.0"
     )
     
-    processor = Wav2Vec2Processor(
+    processor = Wav2Vec2BertProcessor(
         feature_extractor=feature_extractor,
         tokenizer=tokenizer,
     )
