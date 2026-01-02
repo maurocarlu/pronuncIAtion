@@ -351,34 +351,40 @@ def train_mms(
     train_ds = train_ds.remove_columns(cols)
     val_ds = val_ds.remove_columns(cols)
     
-    # Define output features explicitly for proper Arrow serialization
-    output_features = Features({
-        "input_values": Sequence(Value("float32")),
-        "labels": Sequence(Value("int32")),
-        "input_length": Value("int64"),
-        "label_length": Value("int64"),
-    })
-    
+    # Use keep_in_memory to bypass Arrow serialization issues
     train_ds = train_ds.map(
         preprocess, 
         remove_columns=train_ds.column_names, 
         num_proc=1, 
         load_from_cache_file=False,
-        features=output_features,
+        keep_in_memory=True,
     )
     val_ds = val_ds.map(
         preprocess, 
         remove_columns=val_ds.column_names, 
         num_proc=1, 
         load_from_cache_file=False,
-        features=output_features,
+        keep_in_memory=True,
     )
     
     print(f"   Dataset columns after preprocess: {train_ds.column_names}")
     
-    train_ds = train_ds.filter(lambda x: x["label_length"] > 0 and x["label_length"] < x["input_length"] // 320)
-    val_ds = val_ds.filter(lambda x: x["label_length"] > 0 and x["label_length"] < x["input_length"] // 320)
+    train_ds = train_ds.filter(
+        lambda x: x["label_length"] > 0 and x["label_length"] < x["input_length"] // 320,
+        load_from_cache_file=False,
+        keep_in_memory=True,
+    )
+    val_ds = val_ds.filter(
+        lambda x: x["label_length"] > 0 and x["label_length"] < x["input_length"] // 320,
+        load_from_cache_file=False,
+        keep_in_memory=True,
+    )
     print(f"   After filter: Train={len(train_ds)}, Val={len(val_ds)}")
+    
+    # Explicitly set format
+    train_ds.set_format(type=None, columns=["input_values", "labels"])
+    val_ds.set_format(type=None, columns=["input_values", "labels"])
+    print(f"   Format set. Sample keys: {list(train_ds[0].keys())}")
     
     # Metrics
     cer_metric = evaluate.load("cer")
