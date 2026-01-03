@@ -47,6 +47,13 @@ from transformers import (
 )
 import shutil
 
+# PEFT for LoRA with 4-bit quantization
+try:
+    from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+    PEFT_AVAILABLE = True
+except ImportError:
+    PEFT_AVAILABLE = False
+
 warnings.filterwarnings("ignore")
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -255,7 +262,10 @@ def train_mms(
     
     # Setup quantization if needed
     if use_4bit:
-        print("   ⚡ Using 4-bit quantization for limited VRAM")
+        if not PEFT_AVAILABLE:
+            raise ImportError("PEFT library required for 4-bit training. Install with: pip install peft")
+        
+        print("   ⚡ Using 4-bit quantization with LoRA adapters")
         bnb_config = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_quant_type="nf4",
@@ -270,6 +280,21 @@ def train_mms(
             pad_token_id=tokenizer.pad_token_id,
             ignore_mismatched_sizes=True,
         )
+        
+        # Prepare model for k-bit training (sets up gradients properly)
+        model = prepare_model_for_kbit_training(model)
+        
+        # Apply LoRA adapters - target attention layers
+        lora_config = LoraConfig(
+            r=16,  # LoRA rank
+            lora_alpha=32,
+            target_modules=["q_proj", "v_proj"],  # Attention layers
+            lora_dropout=0.05,
+            bias="none",
+        )
+        model = get_peft_model(model, lora_config)
+        model.print_trainable_parameters()
+        print("   ✓ LoRA adapters applied")
     else:
         model = Wav2Vec2ForCTC.from_pretrained(
             "facebook/mms-1b-all",
@@ -279,19 +304,18 @@ def train_mms(
             pad_token_id=tokenizer.pad_token_id,
             ignore_mismatched_sizes=True,
         )
-    
-    # Freeze feature encoder for stability
-    model.freeze_feature_encoder()
-    print("   ✓ Feature encoder frozen")
+        
+        # Freeze feature encoder for stability (only for non-4bit)
+        model.freeze_feature_encoder()
+        print("   ✓ Feature encoder frozen")
+        
+        # CRITICAL: Reinitialize lm_head to prevent CTC collapse (only for non-4bit)
+        nn.init.normal_(model.lm_head.weight, mean=0.0, std=0.02)
+        nn.init.zeros_(model.lm_head.bias)
+        print("   ✓ lm_head reinitialized for custom IPA vocab")
     
     model.gradient_checkpointing_enable()
     print("   ✓ Gradient checkpointing enabled")
-    
-    # CRITICAL: Reinitialize lm_head to prevent CTC collapse
-    # MMS has adapters for different languages - we replace lm_head with our vocab
-    nn.init.normal_(model.lm_head.weight, mean=0.0, std=0.02)
-    nn.init.zeros_(model.lm_head.bias)
-    print("   ✓ lm_head reinitialized for custom IPA vocab")
     
     total_params = sum(p.numel() for p in model.parameters())
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
