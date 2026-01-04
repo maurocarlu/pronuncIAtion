@@ -101,6 +101,8 @@ Modello multimodale (LLM + Audio). Estraiamo solo la "Audio Tower" pre-trainata.
 **Modalità**: Linear Probe (encoder completamente frozen, solo CTC head trainabile).
 **Obiettivo**: Valutare feature "zero-shot" del modello multimodale.
 
+> **⚠️ Nota**: A causa dei requisiti computazionali (~10+ ore di training su GPU consumer), Qwen2-Audio viene trainato su **10.000 samples** invece del dataset completo (~40k).
+
 ---
 
 ## 8. Wav2Vec2-BERT 2.0 (⭐ Recommended)
