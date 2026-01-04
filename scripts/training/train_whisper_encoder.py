@@ -376,16 +376,7 @@ def train_whisper_encoder(
     # Load dataset with memory optimization
     print(f"\n📥 Caricamento dataset: {csv_path}")
     
-    # Limit samples on Kaggle to avoid OOM
-    max_samples = None
-    if '/kaggle' in os.getcwd():
-        max_samples = 10000  # Limita su Kaggle
-        print(f"   ⚠️ Kaggle mode: limiting to {max_samples} samples")
-    
     ds = load_dataset("csv", data_files=csv_path, keep_in_memory=False)["train"]
-    
-    if max_samples:
-        ds = ds.select(range(min(len(ds), max_samples)))
     
     # Fix paths (in batches to save memory)
     def fix_audio_path(example):
