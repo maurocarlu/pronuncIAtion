@@ -244,32 +244,31 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
         print("   ⚠️ La valutazione potrebbe non essere accurata senza SpeechTokenizer encoder.")
     elif is_whisper_encoder:
         print("   Tipo: Whisper Encoder + CTC")
-        print("   ⚠️ Caricamento dataset PRIMA del modello per risparmiare memoria...")
+        print("   ⚠️ Modalità MINIMAL per Kaggle (50 esempi)...")
         
         # Store config for later model loading
         whisper_vocab_size = config.get("vocab_size", 43)
         whisper_model_name = config.get("whisper_model_name", "openai/whisper-small")
-        whisper_model_path = model_path  # Save for later
+        whisper_model_path = model_path
         
-        # Load dataset FIRST (before model) to avoid OOM
-        # LIMIT IMMEDIATELY to avoid OOM during processing
-        print("\n📥 Caricamento SpeechOcean762 (subset limitato)...")
-        ds_full = load_dataset("mispeech/speechocean762", split="test")
+        # MINIMAL APPROACH: Use only first 50 examples to avoid OOM
+        print("\n📥 Caricamento MINIMAL SpeechOcean762 (50 esempi)...")
+        import gc
         
-        # LIMIT to 300 examples BEFORE any processing to save memory
-        max_samples = 300
-        ds = ds_full.select(range(min(max_samples, len(ds_full))))
-        del ds_full  # Free memory immediately
-        print(f"✓ Limitato a {len(ds)} esempi per risparmiare memoria")
-        
-        # Process examples in a simple loop (no map/filter to avoid Arrow issues)
-        print("\n🔄 Conversione fonemi ARPABET → IPA...")
+        # Load with streaming to minimize memory, collect only 50
+        ds_iter = iter(load_dataset("mispeech/speechocean762", split="test", streaming=True))
         collected_examples = []
-        for i in range(len(ds)):
-            ex = ds[i]
+        target_count = 50
+        
+        for i in range(500):  # Check first 500 to find 50 valid
+            try:
+                ex = next(ds_iter)
+            except StopIteration:
+                break
+            
             ref_ipa = extract_phones_from_words(ex["words"])
             if len(ref_ipa) > 0:
-                # Load audio with resampling
+                # Extract audio immediately
                 audio_data = ex["audio"]
                 arr = audio_data["array"]
                 sr = audio_data.get("sampling_rate", 16000)
@@ -283,14 +282,19 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
                     "text": ex["text"],
                     "accuracy": ex["accuracy"],
                     "age": ex.get("age", 0),
-                    "words": ex["words"],
                 })
-            if (i + 1) % 100 == 0:
-                print(f"   Processati {i + 1}/{len(ds)} esempi, validi: {len(collected_examples)}")
+                
+                if len(collected_examples) >= target_count:
+                    break
+            
+            # Aggressive cleanup every 10 examples
+            if i % 10 == 0:
+                gc.collect()
         
-        del ds  # Free HF dataset memory
+        del ds_iter
+        gc.collect()
         ds = collected_examples
-        print(f"✓ Dataset pronto: {len(ds)} esempi validi")
+        print(f"✓ Dataset pronto: {len(ds)} esempi")
         
         # NOW load Whisper model (after dataset is ready)
         print("\n📦 Caricamento Whisper Encoder (post-dataset)...")
@@ -331,35 +335,49 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
         model.eval()
         print("✓ Whisper Encoder caricato!")
         
-    # For Qwen2-Audio, load dataset FIRST before model to avoid OOM
-    # (Qwen2 7B 4-bit uses ~4GB RAM, need room for dataset preprocessing)
-    # STREAMING MODE to avoid Arrow OOM on Kaggle
+    # For Qwen2-Audio, use MINIMAL approach to avoid OOM
     if is_qwen_audio:
-        print("\n📥 Caricamento SpeechOcean762 (STREAMING MODE per evitare OOM)...")
-        # Use streaming=True to avoid loading full dataset into RAM
-        ds_stream = load_dataset("mispeech/speechocean762", split="test", streaming=True)
+        print("\n📥 Caricamento MINIMAL SpeechOcean762 (50 esempi)...")
+        import gc
         
-        # Manually collect valid examples with IPA conversion
-        print("\n🔄 Conversione fonemi ARPABET → IPA (streaming)...")
+        # Load with streaming, collect only 50 valid examples
+        ds_iter = iter(load_dataset("mispeech/speechocean762", split="test", streaming=True))
         collected_examples = []
-        for i, example in enumerate(ds_stream):
-            ref_ipa = extract_phones_from_words(example["words"])
+        target_count = 50
+        
+        for i in range(500):  # Check first 500 to find 50 valid
+            try:
+                ex = next(ds_iter)
+            except StopIteration:
+                break
+            
+            ref_ipa = extract_phones_from_words(ex["words"])
             if len(ref_ipa) > 0:
+                audio_data = ex["audio"]
+                arr = audio_data["array"]
+                sr = audio_data.get("sampling_rate", 16000)
+                if sr != 16000:
+                    import librosa
+                    arr = librosa.resample(arr, orig_sr=sr, target_sr=16000)
+                
                 collected_examples.append({
-                    "audio": example["audio"],  # raw audio dict
+                    "audio": {"array": arr, "sampling_rate": 16000},
                     "reference_ipa": ref_ipa,
-                    "text": example["text"],
-                    "accuracy": example["accuracy"],
-                    "age": example.get("age", 0),
-                    "words": example["words"],
+                    "text": ex["text"],
+                    "accuracy": ex["accuracy"],
+                    "age": ex.get("age", 0),
                 })
-            if (i + 1) % 500 == 0:
-                print(f"   Processati {i + 1} esempi, validi: {len(collected_examples)}")
+                
+                if len(collected_examples) >= target_count:
+                    break
+            
+            if i % 10 == 0:
+                gc.collect()
         
-        print(f"✓ Esempi validi raccolti: {len(collected_examples)}")
-        
-        # Convert to a simple list-based dataset (no Arrow)
-        ds = collected_examples  # will be processed as list, not HF Dataset
+        del ds_iter
+        gc.collect()
+        ds = collected_examples
+        print(f"✓ Dataset pronto: {len(ds)} esempi")
         
         # Now load Qwen2 model
         print("\n📦 Caricamento Qwen2-Audio (post-dataset preprocessing)...")
