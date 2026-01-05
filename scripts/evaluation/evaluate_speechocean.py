@@ -247,11 +247,27 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
         print("   ⚠️ Whisper Encoder richiede mel spectrograms - valutazione semplificata")
         # Fallback: stampa warning e usa placeholder
         model = None
-    elif is_qwen_audio:
-        print("   Tipo: Qwen2-Audio + CTC (Linear Probe)")
+    # For Qwen2-Audio, load dataset FIRST before model to avoid OOM
+    # (Qwen2 7B 4-bit uses ~4GB RAM, need room for dataset preprocessing)
+    if is_qwen_audio:
+        print("\n📥 Scaricamento SpeechOcean762 (pre-model load for RAM efficiency)...")
+        ds = load_dataset("mispeech/speechocean762", split="test")
+        ds = ds.cast_column("audio", Audio(sampling_rate=16000))
+        print(f"✓ Caricati {len(ds)} esempi")
+        
+        def prepare_example(example):
+            example["reference_ipa"] = extract_phones_from_words(example["words"])
+            return example
+        
+        print("\n🔄 Conversione fonemi ARPABET → IPA...")
+        ds = ds.map(prepare_example)
+        ds = ds.filter(lambda x: len(x["reference_ipa"]) > 0)
+        print(f"✓ Esempi validi: {len(ds)}")
+        
+        # Now load Qwen2 model
+        print("\n📦 Caricamento Qwen2-Audio (post-dataset preprocessing)...")
         vocab_size = config.get("vocab_size", 43)
         
-        # Define Qwen2-Audio model class inline
         class Qwen2AudioEncoderForCTC(nn.Module):
             def __init__(self, vocab_size: int, device: str = "cuda"):
                 super().__init__()
@@ -295,48 +311,41 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
                 logits = self.ctc_head(hidden_states.to(self._device))
                 return {"logits": logits}
         
-        # Check if bitsandbytes is available
         try:
             import bitsandbytes
             device = "cuda" if torch.cuda.is_available() else "cpu"
             model = Qwen2AudioEncoderForCTC(vocab_size, device=device)
             
-            # Load CTC head weights
             ctc_head_path = Path(model_path) / "ctc_head.bin"
             if ctc_head_path.exists():
                 state_dict = torch.load(ctc_head_path, map_location="cpu")
                 model.ctc_head.load_state_dict(state_dict)
                 print(f"   ✓ CTC head caricata da: {ctc_head_path}")
-            else:
-                print(f"   ⚠️ ctc_head.bin non trovato!")
             
-            # Store feature extractor for preprocessing
             qwen_feature_extractor = model.processor.feature_extractor
+            model.eval()
+            print("✓ Modello caricato!")
         except ImportError:
-            print("   ⚠️ bitsandbytes non disponibile - Qwen2 richiede bitsandbytes!")
+            print("   ⚠️ bitsandbytes non disponibile!")
             model = None
     else:
-        print("   Tipo: WavLMForCTC (standard)")
-        model = WavLMForCTC.from_pretrained(model_path)
-    
-    model.eval()
-    print("✓ Modello caricato!")
-    
-    # Carica dataset
-    print("\n📥 Scaricamento SpeechOcean762...")
-    ds = load_dataset("mispeech/speechocean762", split="test", trust_remote_code=True)
-    ds = ds.cast_column("audio", Audio(sampling_rate=16000))
-    print(f"✓ Caricati {len(ds)} esempi")
-    
-    # Preprocessing
-    def prepare_example(example):
-        example["reference_ipa"] = extract_phones_from_words(example["words"])
-        return example
-    
-    print("\n🔄 Conversione fonemi ARPABET → IPA...")
-    ds = ds.map(prepare_example)
-    ds = ds.filter(lambda x: len(x["reference_ipa"]) > 0)
-    print(f"✓ Esempi validi: {len(ds)}")
+        model.eval()
+        print("✓ Modello caricato!")
+        
+        # Load dataset for non-Qwen models
+        print("\n📥 Scaricamento SpeechOcean762...")
+        ds = load_dataset("mispeech/speechocean762", split="test")
+        ds = ds.cast_column("audio", Audio(sampling_rate=16000))
+        print(f"✓ Caricati {len(ds)} esempi")
+        
+        def prepare_example(example):
+            example["reference_ipa"] = extract_phones_from_words(example["words"])
+            return example
+        
+        print("\n🔄 Conversione fonemi ARPABET → IPA...")
+        ds = ds.map(prepare_example)
+        ds = ds.filter(lambda x: len(x["reference_ipa"]) > 0)
+        print(f"✓ Esempi validi: {len(ds)}")
     
     # ==========================================================================
     # PREDIZIONE CON CONFIDENCE SCORE
