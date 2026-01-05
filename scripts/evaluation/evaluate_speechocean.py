@@ -244,9 +244,55 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
         print("   ⚠️ La valutazione potrebbe non essere accurata senza SpeechTokenizer encoder.")
     elif is_whisper_encoder:
         print("   Tipo: Whisper Encoder + CTC")
-        # Load Whisper Encoder with CTC head (lm_head)
-        vocab_size = config.get("vocab_size", 43)
+        print("   ⚠️ Caricamento dataset PRIMA del modello per risparmiare memoria...")
+        
+        # Store config for later model loading
+        whisper_vocab_size = config.get("vocab_size", 43)
         whisper_model_name = config.get("whisper_model_name", "openai/whisper-small")
+        whisper_model_path = model_path  # Save for later
+        
+        # Load dataset FIRST (before model) to avoid OOM
+        print("\n📥 Caricamento SpeechOcean762 (BEFORE model load)...")
+        from datasets import load_dataset, Audio
+        ds = load_dataset("mispeech/speechocean762", split="test")
+        print(f"✓ Caricati {len(ds)} esempi")
+        
+        # Prepare IPA labels (NO audio casting yet to save memory)
+        def prepare_example(example):
+            example["reference_ipa"] = extract_phones_from_words(example["words"])
+            return example
+        
+        print("\n🔄 Conversione fonemi ARPABET → IPA...")
+        ds = ds.map(prepare_example)
+        
+        # Filter and limit dataset
+        valid_indices = [i for i in range(len(ds)) if len(ds[i]["reference_ipa"]) > 0]
+        # Limit to 500 examples to reduce memory on Kaggle
+        max_samples = min(500, len(valid_indices))
+        ds = ds.select(valid_indices[:max_samples])
+        print(f"✓ Esempi validi (limitati a {max_samples}): {len(ds)}")
+        
+        # NOW cast audio (after filtering to reduce memory)
+        ds = ds.cast_column("audio", Audio(sampling_rate=16000))
+        print("✓ Audio resampled a 16kHz")
+        
+        # Convert to list for manual processing
+        collected_examples = []
+        for i in range(len(ds)):
+            ex = ds[i]
+            collected_examples.append({
+                "audio": ex["audio"],
+                "reference_ipa": ex["reference_ipa"],
+                "text": ex["text"],
+                "accuracy": ex["accuracy"],
+                "age": ex.get("age", 0),
+                "words": ex["words"],
+            })
+        ds = collected_examples
+        print(f"✓ Dataset convertito in lista: {len(ds)} esempi")
+        
+        # NOW load Whisper model (after dataset is ready)
+        print("\n📦 Caricamento Whisper Encoder (post-dataset)...")
         
         class WhisperEncoderForCTC(nn.Module):
             def __init__(self, vocab_size: int, whisper_model_name: str = "openai/whisper-small"):
@@ -260,37 +306,29 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
                 for param in self.whisper.encoder.parameters():
                     param.requires_grad = False
                 
-                hidden_size = self.whisper.config.d_model  # 768 for whisper-small
-                # Simple linear head matching training script (lm_head)
+                hidden_size = self.whisper.config.d_model
                 self.lm_head = nn.Linear(hidden_size, vocab_size)
             
             def forward(self, input_features, **kwargs):
-                # Use only encoder
                 encoder_outputs = self.whisper.encoder(input_features)
                 hidden_states = encoder_outputs.last_hidden_state
                 logits = self.lm_head(hidden_states)
                 return {"logits": logits}
         
-        model = WhisperEncoderForCTC(vocab_size, whisper_model_name)
+        model = WhisperEncoderForCTC(whisper_vocab_size, whisper_model_name)
         
-        # Load lm_head weights from pytorch_model.bin
-        pytorch_model_path = Path(model_path) / "pytorch_model.bin"
-        
+        # Load lm_head weights
+        pytorch_model_path = Path(whisper_model_path) / "pytorch_model.bin"
         if pytorch_model_path.exists():
             state_dict = torch.load(pytorch_model_path, map_location="cpu")
-            # Extract lm_head weights
             lm_head_state = {k.replace("lm_head.", ""): v for k, v in state_dict.items() if k.startswith("lm_head.")}
             if lm_head_state:
                 model.lm_head.load_state_dict(lm_head_state)
-                print(f"   ✓ lm_head caricata: weight {lm_head_state['weight'].shape}, bias {lm_head_state['bias'].shape}")
-            else:
-                print(f"   ⚠️ Nessun lm_head trovato in {pytorch_model_path}")
-        else:
-            print(f"   ⚠️ Nessun file pytorch_model.bin trovato!")
+                print(f"   ✓ lm_head caricata: weight {lm_head_state['weight'].shape}")
         
-        # Store feature extractor for later use
         whisper_feature_extractor = model.feature_extractor
-        is_whisper_encoder = True  # Flag for inference
+        model.eval()
+        print("✓ Whisper Encoder caricato!")
         
     # For Qwen2-Audio, load dataset FIRST before model to avoid OOM
     # (Qwen2 7B 4-bit uses ~4GB RAM, need room for dataset preprocessing)
@@ -392,33 +430,38 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
         print("\n❌ Impossibile caricare il modello. Uscita.")
         return None
     
-    if not is_qwen_audio:  # Qwen already called model.eval() above
+    if not is_qwen_audio and not is_whisper_encoder:  # These already loaded dataset above
         model.eval()
         print("✓ Modello caricato!")
         
-        # Load dataset for non-Qwen models - USE STREAMING to avoid OOM
-        print("\n📥 Caricamento SpeechOcean762 (STREAMING MODE per evitare OOM)...")
-        ds_stream = load_dataset("mispeech/speechocean762", split="test", streaming=True)
+        # Load dataset for other models (wav2vec, wavlm, hubert, etc.)
+        print("\n📥 Scaricamento SpeechOcean762...")
+        ds = load_dataset("mispeech/speechocean762", split="test")
+        ds = ds.cast_column("audio", Audio(sampling_rate=16000))
+        print(f"✓ Caricati {len(ds)} esempi")
         
-        # Manually collect valid examples with IPA conversion
-        print("\n🔄 Conversione fonemi ARPABET → IPA (streaming)...")
+        def prepare_example(example):
+            example["reference_ipa"] = extract_phones_from_words(example["words"])
+            return example
+        
+        print("\n🔄 Conversione fonemi ARPABET → IPA...")
+        ds = ds.map(prepare_example)
+        ds = ds.filter(lambda x: len(x["reference_ipa"]) > 0)
+        print(f"✓ Esempi validi: {len(ds)}")
+        
+        # Convert to list format for unified processing
         collected_examples = []
-        for i, example in enumerate(ds_stream):
-            ref_ipa = extract_phones_from_words(example["words"])
-            if len(ref_ipa) > 0:
-                collected_examples.append({
-                    "audio": example["audio"],  # raw audio dict with 'array' and 'sampling_rate'
-                    "reference_ipa": ref_ipa,
-                    "text": example["text"],
-                    "accuracy": example["accuracy"],
-                    "age": example.get("age", 0),
-                    "words": example["words"],
-                })
-            if (i + 1) % 500 == 0:
-                print(f"   Processati {i + 1} esempi, validi: {len(collected_examples)}")
-        
-        print(f"✓ Esempi validi raccolti: {len(collected_examples)}")
-        ds = collected_examples  # Will be processed as list, not HF Dataset
+        for i in range(len(ds)):
+            ex = ds[i]
+            collected_examples.append({
+                "audio": ex["audio"],
+                "reference_ipa": ex["reference_ipa"],
+                "text": ex["text"],
+                "accuracy": ex["accuracy"],
+                "age": ex.get("age", 0),
+                "words": ex["words"],
+            })
+        ds = collected_examples
     
     # ==========================================================================
     # PREDIZIONE CON CONFIDENCE SCORE (BATCH PROCESSING FOR LIST)
