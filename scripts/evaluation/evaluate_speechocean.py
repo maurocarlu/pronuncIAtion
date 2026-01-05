@@ -248,9 +248,73 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
         # Fallback: stampa warning e usa placeholder
         model = None
     elif is_qwen_audio:
-        print("   Tipo: Qwen2-Audio + CTC")
-        print("   ⚠️ Qwen2-Audio richiede caricamento speciale - valutazione semplificata")
-        model = None
+        print("   Tipo: Qwen2-Audio + CTC (Linear Probe)")
+        vocab_size = config.get("vocab_size", 43)
+        
+        # Define Qwen2-Audio model class inline
+        class Qwen2AudioEncoderForCTC(nn.Module):
+            def __init__(self, vocab_size: int, device: str = "cuda"):
+                super().__init__()
+                from transformers import BitsAndBytesConfig, AutoProcessor
+                
+                bnb_config = BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_use_double_quant=True,
+                    bnb_4bit_quant_type="nf4",
+                    bnb_4bit_compute_dtype=torch.float16,
+                )
+                
+                from transformers import Qwen2AudioForConditionalGeneration
+                self.processor = AutoProcessor.from_pretrained(
+                    "Qwen/Qwen2-Audio-7B-Instruct",
+                    trust_remote_code=True,
+                )
+                qwen_model = Qwen2AudioForConditionalGeneration.from_pretrained(
+                    "Qwen/Qwen2-Audio-7B-Instruct",
+                    quantization_config=bnb_config,
+                    device_map="auto",
+                    trust_remote_code=True,
+                )
+                self.audio_encoder = qwen_model.audio_tower
+                for param in self.audio_encoder.parameters():
+                    param.requires_grad = False
+                
+                hidden_size = 1280
+                self.ctc_head = nn.Sequential(
+                    nn.Linear(hidden_size, 512),
+                    nn.GELU(),
+                    nn.Dropout(0.1),
+                    nn.Linear(512, vocab_size),
+                ).to(device)
+                self._device = device
+            
+            def forward(self, input_features, **kwargs):
+                with torch.no_grad():
+                    audio_outputs = self.audio_encoder(input_features)
+                    hidden_states = audio_outputs.last_hidden_state
+                logits = self.ctc_head(hidden_states.to(self._device))
+                return {"logits": logits}
+        
+        # Check if bitsandbytes is available
+        try:
+            import bitsandbytes
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            model = Qwen2AudioEncoderForCTC(vocab_size, device=device)
+            
+            # Load CTC head weights
+            ctc_head_path = Path(model_path) / "ctc_head.bin"
+            if ctc_head_path.exists():
+                state_dict = torch.load(ctc_head_path, map_location="cpu")
+                model.ctc_head.load_state_dict(state_dict)
+                print(f"   ✓ CTC head caricata da: {ctc_head_path}")
+            else:
+                print(f"   ⚠️ ctc_head.bin non trovato!")
+            
+            # Store feature extractor for preprocessing
+            qwen_feature_extractor = model.processor.feature_extractor
+        except ImportError:
+            print("   ⚠️ bitsandbytes non disponibile - Qwen2 richiede bitsandbytes!")
+            model = None
     else:
         print("   Tipo: WavLMForCTC (standard)")
         model = WavLMForCTC.from_pretrained(model_path)
@@ -281,26 +345,49 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
         """Predice IPA e calcola confidence score."""
         audio_arrays = [x["array"] for x in batch["audio"]]
         
-        inputs = processor(
-            audio_arrays,
-            sampling_rate=16000,
-            return_tensors="pt",
-            padding=True
-        )
-        
-        with torch.no_grad():
-            # Handle different input types for different models
-            if hasattr(inputs, 'input_features') and inputs.input_features is not None:
-                # Wav2Vec2-BERT uses input_features (spectrograms)
-                outputs = model(inputs.input_features)
-            else:
-                # Standard Wav2Vec2/WavLM uses input_values (raw audio)
-                outputs = model(inputs.input_values)
-            # Handle both dict (custom model) and object (standard model)
-            if isinstance(outputs, dict):
+        # Special handling for Qwen2-Audio (needs mel spectrograms)
+        if is_qwen_audio and model is not None:
+            import librosa
+            mel_features = []
+            for audio in audio_arrays:
+                mel = qwen_feature_extractor(
+                    audio, sampling_rate=16000, return_tensors="pt"
+                ).input_features[0]
+                mel_features.append(mel)
+            # Stack and pad
+            max_len = max(m.shape[-1] for m in mel_features)
+            padded_mels = []
+            for m in mel_features:
+                if m.shape[-1] < max_len:
+                    pad_width = max_len - m.shape[-1]
+                    m = torch.nn.functional.pad(m, (0, pad_width))
+                padded_mels.append(m)
+            input_features = torch.stack(padded_mels)
+            
+            with torch.no_grad():
+                outputs = model(input_features)
                 logits = outputs["logits"]
-            else:
-                logits = outputs.logits
+        else:
+            inputs = processor(
+                audio_arrays,
+                sampling_rate=16000,
+                return_tensors="pt",
+                padding=True
+            )
+            
+            with torch.no_grad():
+                # Handle different input types for different models
+                if hasattr(inputs, 'input_features') and inputs.input_features is not None:
+                    # Wav2Vec2-BERT uses input_features (spectrograms)
+                    outputs = model(inputs.input_features)
+                else:
+                    # Standard Wav2Vec2/WavLM uses input_values (raw audio)
+                    outputs = model(inputs.input_values)
+                # Handle both dict (custom model) and object (standard model)
+                if isinstance(outputs, dict):
+                    logits = outputs["logits"]
+                else:
+                    logits = outputs.logits
         
         # Predizioni
         predicted_ids = torch.argmax(logits, dim=-1)
