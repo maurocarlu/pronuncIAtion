@@ -303,27 +303,33 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
         
     # For Qwen2-Audio, load dataset FIRST before model to avoid OOM
     # (Qwen2 7B 4-bit uses ~4GB RAM, need room for dataset preprocessing)
+    # STREAMING MODE to avoid Arrow OOM on Kaggle
     if is_qwen_audio:
-        print("\n📥 Scaricamento SpeechOcean762 (pre-model load for RAM efficiency)...")
-        ds = load_dataset("mispeech/speechocean762", split="test")
-        # DON'T cast audio yet - causes OOM during filter
-        print(f"✓ Caricati {len(ds)} esempi")
+        print("\n📥 Caricamento SpeechOcean762 (STREAMING MODE per evitare OOM)...")
+        # Use streaming=True to avoid loading full dataset into RAM
+        ds_stream = load_dataset("mispeech/speechocean762", split="test", streaming=True)
         
-        def prepare_example(example):
-            example["reference_ipa"] = extract_phones_from_words(example["words"])
-            return example
+        # Manually collect valid examples with IPA conversion
+        print("\n🔄 Conversione fonemi ARPABET → IPA (streaming)...")
+        collected_examples = []
+        for i, example in enumerate(ds_stream):
+            ref_ipa = extract_phones_from_words(example["words"])
+            if len(ref_ipa) > 0:
+                collected_examples.append({
+                    "audio": example["audio"],  # raw audio dict
+                    "reference_ipa": ref_ipa,
+                    "text": example["text"],
+                    "accuracy": example["accuracy"],
+                    "age": example.get("age", 0),
+                    "words": example["words"],
+                })
+            if (i + 1) % 500 == 0:
+                print(f"   Processati {i + 1} esempi, validi: {len(collected_examples)}")
         
-        print("\n🔄 Conversione fonemi ARPABET → IPA...")
-        ds = ds.map(prepare_example)
+        print(f"✓ Esempi validi raccolti: {len(collected_examples)}")
         
-        # Use list-based filter to avoid Arrow memory issues
-        print("Filtering examples with valid IPA...")
-        valid_indices = [i for i, ex in enumerate(ds) if len(ex["reference_ipa"]) > 0]
-        ds = ds.select(valid_indices)
-        print(f"✓ Esempi validi: {len(ds)}")
-        
-        # NOW cast audio (after filter to avoid loading all audio at once)
-        ds = ds.cast_column("audio", Audio(sampling_rate=16000))
+        # Convert to a simple list-based dataset (no Arrow)
+        ds = collected_examples  # will be processed as list, not HF Dataset
         
         # Now load Qwen2 model
         print("\n📦 Caricamento Qwen2-Audio (post-dataset preprocessing)...")
@@ -399,123 +405,159 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
         model.eval()
         print("✓ Modello caricato!")
         
-        # Load dataset for non-Qwen models
-        print("\n📥 Scaricamento SpeechOcean762...")
-        ds = load_dataset("mispeech/speechocean762", split="test")
-        ds = ds.cast_column("audio", Audio(sampling_rate=16000))
-        print(f"✓ Caricati {len(ds)} esempi")
+        # Load dataset for non-Qwen models - USE STREAMING to avoid OOM
+        print("\n📥 Caricamento SpeechOcean762 (STREAMING MODE per evitare OOM)...")
+        ds_stream = load_dataset("mispeech/speechocean762", split="test", streaming=True)
         
-        def prepare_example(example):
-            example["reference_ipa"] = extract_phones_from_words(example["words"])
-            return example
+        # Manually collect valid examples with IPA conversion
+        print("\n🔄 Conversione fonemi ARPABET → IPA (streaming)...")
+        collected_examples = []
+        for i, example in enumerate(ds_stream):
+            ref_ipa = extract_phones_from_words(example["words"])
+            if len(ref_ipa) > 0:
+                collected_examples.append({
+                    "audio": example["audio"],  # raw audio dict with 'array' and 'sampling_rate'
+                    "reference_ipa": ref_ipa,
+                    "text": example["text"],
+                    "accuracy": example["accuracy"],
+                    "age": example.get("age", 0),
+                    "words": example["words"],
+                })
+            if (i + 1) % 500 == 0:
+                print(f"   Processati {i + 1} esempi, validi: {len(collected_examples)}")
         
-        print("\n🔄 Conversione fonemi ARPABET → IPA...")
-        ds = ds.map(prepare_example)
-        # Use list-based filter to avoid Arrow memory issues on Kaggle
-        valid_indices = [i for i, ex in enumerate(ds) if len(ex["reference_ipa"]) > 0]
-        ds = ds.select(valid_indices)
-        print(f"✓ Esempi validi: {len(ds)}")
+        print(f"✓ Esempi validi raccolti: {len(collected_examples)}")
+        ds = collected_examples  # Will be processed as list, not HF Dataset
     
     # ==========================================================================
-    # PREDIZIONE CON CONFIDENCE SCORE
+    # PREDIZIONE CON CONFIDENCE SCORE (BATCH PROCESSING FOR LIST)
     # ==========================================================================
-    def predict_with_confidence(batch):
-        """Predice IPA e calcola confidence score."""
-        audio_arrays = [x["array"] for x in batch["audio"]]
-        
-        # Special handling for Qwen2-Audio (needs mel spectrograms)
-        if is_qwen_audio and model is not None:
-            import librosa
-            mel_features = []
-            for audio in audio_arrays:
-                mel = qwen_feature_extractor(
-                    audio, sampling_rate=16000, return_tensors="pt"
-                ).input_features[0]
-                mel_features.append(mel)
-            # Stack and pad
-            max_len = max(m.shape[-1] for m in mel_features)
-            padded_mels = []
-            for m in mel_features:
-                if m.shape[-1] < max_len:
-                    pad_width = max_len - m.shape[-1]
-                    m = torch.nn.functional.pad(m, (0, pad_width))
-                padded_mels.append(m)
-            input_features = torch.stack(padded_mels)
-            
-            with torch.no_grad():
-                outputs = model(input_features)
-                logits = outputs["logits"]
-        elif is_whisper_encoder:
-            # Whisper Encoder needs mel spectrograms
-            mel_features = []
-            for audio in audio_arrays:
-                mel = whisper_feature_extractor(
-                    audio, sampling_rate=16000, return_tensors="pt"
-                ).input_features[0]
-                mel_features.append(mel)
-            # Stack and pad
-            max_len = max(m.shape[-1] for m in mel_features)
-            padded_mels = []
-            for m in mel_features:
-                if m.shape[-1] < max_len:
-                    pad_width = max_len - m.shape[-1]
-                    m = torch.nn.functional.pad(m, (0, pad_width))
-                padded_mels.append(m)
-            input_features = torch.stack(padded_mels)
-            
-            with torch.no_grad():
-                outputs = model(input_features)
-                logits = outputs["logits"]
-        else:
-            inputs = processor(
-                audio_arrays,
-                sampling_rate=16000,
-                return_tensors="pt",
-                padding=True
-            )
-            
-            with torch.no_grad():
-                # Handle different input types for different models
-                if hasattr(inputs, 'input_features') and inputs.input_features is not None:
-                    # Wav2Vec2-BERT uses input_features (spectrograms)
-                    outputs = model(inputs.input_features)
-                else:
-                    # Standard Wav2Vec2/WavLM uses input_values (raw audio)
-                    outputs = model(inputs.input_values)
-                # Handle both dict (custom model) and object (standard model)
-                if isinstance(outputs, dict):
-                    logits = outputs["logits"]
-                else:
-                    logits = outputs.logits
-        
-        # Predizioni
-        predicted_ids = torch.argmax(logits, dim=-1)
-        batch["predicted_ipa"] = processor.batch_decode(predicted_ids)
-        
-        # Calcola confidence score
-        # Applica softmax per ottenere probabilità
-        probs = F.softmax(logits, dim=-1)
-        
-        # Per ogni sequenza, prendi la probabilità massima di ogni token
-        max_probs = torch.max(probs, dim=-1).values  # [batch, seq_len]
-        
-        # Maschera per ignorare padding (token con id 0 = PAD)
-        # Calcola confidence media escludendo PAD tokens
-        confidence_scores = []
-        for i in range(len(audio_arrays)):
-            # Trova token non-PAD
-            non_pad_mask = predicted_ids[i] != processor.tokenizer.pad_token_id
-            if non_pad_mask.sum() > 0:
-                conf = max_probs[i][non_pad_mask].mean().item()
-            else:
-                conf = 0.0
-            confidence_scores.append(conf)
-        
-        batch["confidence_score"] = confidence_scores
-        return batch
-    
     print("\n🔄 Esecuzione inferenza con confidence scoring...")
-    results = ds.map(predict_with_confidence, batched=True, batch_size=4)
+    
+    # ds is now a Python list, process in batches manually
+    batch_size = 4
+    results = []  # Will store processed examples
+    
+    for batch_start in range(0, len(ds), batch_size):
+        batch_end = min(batch_start + batch_size, len(ds))
+        batch_examples = ds[batch_start:batch_end]
+        
+        # Extract audio arrays from batch
+        audio_arrays = []
+        for ex in batch_examples:
+            audio_data = ex["audio"]
+            # Handle both dict format (from streaming) and array format
+            if isinstance(audio_data, dict):
+                arr = audio_data["array"]
+                sr = audio_data.get("sampling_rate", 16000)
+                # Resample if needed
+                if sr != 16000:
+                    import librosa
+                    arr = librosa.resample(arr, orig_sr=sr, target_sr=16000)
+                audio_arrays.append(arr)
+            else:
+                audio_arrays.append(audio_data)
+        
+        # Run inference
+        try:
+            if is_qwen_audio and model is not None:
+                mel_features = []
+                for audio in audio_arrays:
+                    mel = qwen_feature_extractor(
+                        audio, sampling_rate=16000, return_tensors="pt"
+                    ).input_features[0]
+                    mel_features.append(mel)
+                # Stack and pad
+                max_len = max(m.shape[-1] for m in mel_features)
+                padded_mels = []
+                for m in mel_features:
+                    if m.shape[-1] < max_len:
+                        pad_width = max_len - m.shape[-1]
+                        m = torch.nn.functional.pad(m, (0, pad_width))
+                    padded_mels.append(m)
+                input_features = torch.stack(padded_mels)
+                
+                with torch.no_grad():
+                    outputs = model(input_features)
+                    logits = outputs["logits"]
+            elif is_whisper_encoder:
+                mel_features = []
+                for audio in audio_arrays:
+                    mel = whisper_feature_extractor(
+                        audio, sampling_rate=16000, return_tensors="pt"
+                    ).input_features[0]
+                    mel_features.append(mel)
+                # Stack and pad
+                max_len = max(m.shape[-1] for m in mel_features)
+                padded_mels = []
+                for m in mel_features:
+                    if m.shape[-1] < max_len:
+                        pad_width = max_len - m.shape[-1]
+                        m = torch.nn.functional.pad(m, (0, pad_width))
+                    padded_mels.append(m)
+                input_features = torch.stack(padded_mels)
+                
+                with torch.no_grad():
+                    outputs = model(input_features)
+                    logits = outputs["logits"]
+            else:
+                inputs = processor(
+                    audio_arrays,
+                    sampling_rate=16000,
+                    return_tensors="pt",
+                    padding=True
+                )
+                
+                with torch.no_grad():
+                    if hasattr(inputs, 'input_features') and inputs.input_features is not None:
+                        outputs = model(inputs.input_features)
+                    else:
+                        outputs = model(inputs.input_values)
+                    if isinstance(outputs, dict):
+                        logits = outputs["logits"]
+                    else:
+                        logits = outputs.logits
+            
+            # Predictions
+            predicted_ids = torch.argmax(logits, dim=-1)
+            predicted_texts = processor.batch_decode(predicted_ids)
+            
+            # Confidence scores
+            probs = F.softmax(logits, dim=-1)
+            max_probs = torch.max(probs, dim=-1).values
+            
+            for i, ex in enumerate(batch_examples):
+                # Calculate confidence
+                non_pad_mask = predicted_ids[i] != processor.tokenizer.pad_token_id
+                if non_pad_mask.sum() > 0:
+                    conf = max_probs[i][non_pad_mask].mean().item()
+                else:
+                    conf = 0.0
+                
+                # Store result
+                results.append({
+                    "predicted_ipa": predicted_texts[i],
+                    "reference_ipa": ex["reference_ipa"],
+                    "confidence_score": conf,
+                    "accuracy": ex["accuracy"],
+                    "text": ex["text"],
+                    "age": ex.get("age", 0),
+                })
+        except Exception as e:
+            print(f"   ⚠️ Errore batch {batch_start}-{batch_end}: {e}")
+            # Add placeholder results for failed batch
+            for ex in batch_examples:
+                results.append({
+                    "predicted_ipa": "",
+                    "reference_ipa": ex["reference_ipa"],
+                    "confidence_score": 0.0,
+                    "accuracy": ex["accuracy"],
+                    "text": ex["text"],
+                    "age": ex.get("age", 0),
+                })
+        
+        if (batch_end) % 200 == 0 or batch_end == len(ds):
+            print(f"   Processati {batch_end}/{len(ds)} esempi")
     
     # ==========================================================================
     # PREPARA DATI PER ANALISI
