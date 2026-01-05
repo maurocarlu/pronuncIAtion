@@ -252,44 +252,45 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
         whisper_model_path = model_path  # Save for later
         
         # Load dataset FIRST (before model) to avoid OOM
-        print("\n📥 Caricamento SpeechOcean762 (BEFORE model load)...")
-        from datasets import load_dataset, Audio
-        ds = load_dataset("mispeech/speechocean762", split="test")
-        print(f"✓ Caricati {len(ds)} esempi")
+        # LIMIT IMMEDIATELY to avoid OOM during processing
+        print("\n📥 Caricamento SpeechOcean762 (subset limitato)...")
+        ds_full = load_dataset("mispeech/speechocean762", split="test")
         
-        # Prepare IPA labels (NO audio casting yet to save memory)
-        def prepare_example(example):
-            example["reference_ipa"] = extract_phones_from_words(example["words"])
-            return example
+        # LIMIT to 300 examples BEFORE any processing to save memory
+        max_samples = 300
+        ds = ds_full.select(range(min(max_samples, len(ds_full))))
+        del ds_full  # Free memory immediately
+        print(f"✓ Limitato a {len(ds)} esempi per risparmiare memoria")
         
+        # Process examples in a simple loop (no map/filter to avoid Arrow issues)
         print("\n🔄 Conversione fonemi ARPABET → IPA...")
-        ds = ds.map(prepare_example)
-        
-        # Filter and limit dataset
-        valid_indices = [i for i in range(len(ds)) if len(ds[i]["reference_ipa"]) > 0]
-        # Limit to 500 examples to reduce memory on Kaggle
-        max_samples = min(500, len(valid_indices))
-        ds = ds.select(valid_indices[:max_samples])
-        print(f"✓ Esempi validi (limitati a {max_samples}): {len(ds)}")
-        
-        # NOW cast audio (after filtering to reduce memory)
-        ds = ds.cast_column("audio", Audio(sampling_rate=16000))
-        print("✓ Audio resampled a 16kHz")
-        
-        # Convert to list for manual processing
         collected_examples = []
         for i in range(len(ds)):
             ex = ds[i]
-            collected_examples.append({
-                "audio": ex["audio"],
-                "reference_ipa": ex["reference_ipa"],
-                "text": ex["text"],
-                "accuracy": ex["accuracy"],
-                "age": ex.get("age", 0),
-                "words": ex["words"],
-            })
+            ref_ipa = extract_phones_from_words(ex["words"])
+            if len(ref_ipa) > 0:
+                # Load audio with resampling
+                audio_data = ex["audio"]
+                arr = audio_data["array"]
+                sr = audio_data.get("sampling_rate", 16000)
+                if sr != 16000:
+                    import librosa
+                    arr = librosa.resample(arr, orig_sr=sr, target_sr=16000)
+                
+                collected_examples.append({
+                    "audio": {"array": arr, "sampling_rate": 16000},
+                    "reference_ipa": ref_ipa,
+                    "text": ex["text"],
+                    "accuracy": ex["accuracy"],
+                    "age": ex.get("age", 0),
+                    "words": ex["words"],
+                })
+            if (i + 1) % 100 == 0:
+                print(f"   Processati {i + 1}/{len(ds)} esempi, validi: {len(collected_examples)}")
+        
+        del ds  # Free HF dataset memory
         ds = collected_examples
-        print(f"✓ Dataset convertito in lista: {len(ds)} esempi")
+        print(f"✓ Dataset pronto: {len(ds)} esempi validi")
         
         # NOW load Whisper model (after dataset is ready)
         print("\n📦 Caricamento Whisper Encoder (post-dataset)...")
