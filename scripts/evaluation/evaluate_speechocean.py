@@ -252,7 +252,7 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
     if is_qwen_audio:
         print("\n📥 Scaricamento SpeechOcean762 (pre-model load for RAM efficiency)...")
         ds = load_dataset("mispeech/speechocean762", split="test")
-        ds = ds.cast_column("audio", Audio(sampling_rate=16000))
+        # DON'T cast audio yet - causes OOM during filter
         print(f"✓ Caricati {len(ds)} esempi")
         
         def prepare_example(example):
@@ -263,6 +263,9 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
         ds = ds.map(prepare_example)
         ds = ds.filter(lambda x: len(x["reference_ipa"]) > 0)
         print(f"✓ Esempi validi: {len(ds)}")
+        
+        # NOW cast audio (after filter to avoid loading all audio at once)
+        ds = ds.cast_column("audio", Audio(sampling_rate=16000))
         
         # Now load Qwen2 model
         print("\n📦 Caricamento Qwen2-Audio (post-dataset preprocessing)...")
