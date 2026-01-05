@@ -244,7 +244,7 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
         print("   ⚠️ La valutazione potrebbe non essere accurata senza SpeechTokenizer encoder.")
     elif is_whisper_encoder:
         print("   Tipo: Whisper Encoder + CTC")
-        # Load Whisper Encoder with CTC head
+        # Load Whisper Encoder with CTC head (lm_head)
         vocab_size = config.get("vocab_size", 43)
         whisper_model_name = config.get("whisper_model_name", "openai/whisper-small")
         
@@ -260,42 +260,33 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
                 for param in self.whisper.encoder.parameters():
                     param.requires_grad = False
                 
-                hidden_size = self.whisper.config.d_model
-                self.ctc_head = nn.Sequential(
-                    nn.Linear(hidden_size, hidden_size // 2),
-                    nn.GELU(),
-                    nn.Dropout(0.1),
-                    nn.Linear(hidden_size // 2, vocab_size),
-                )
+                hidden_size = self.whisper.config.d_model  # 768 for whisper-small
+                # Simple linear head matching training script (lm_head)
+                self.lm_head = nn.Linear(hidden_size, vocab_size)
             
             def forward(self, input_features, **kwargs):
                 # Use only encoder
                 encoder_outputs = self.whisper.encoder(input_features)
                 hidden_states = encoder_outputs.last_hidden_state
-                logits = self.ctc_head(hidden_states)
+                logits = self.lm_head(hidden_states)
                 return {"logits": logits}
         
         model = WhisperEncoderForCTC(vocab_size, whisper_model_name)
         
-        # Load CTC head weights
-        ctc_head_path = Path(model_path) / "ctc_head.bin"
+        # Load lm_head weights from pytorch_model.bin
         pytorch_model_path = Path(model_path) / "pytorch_model.bin"
         
-        if ctc_head_path.exists():
-            state_dict = torch.load(ctc_head_path, map_location="cpu")
-            model.ctc_head.load_state_dict(state_dict)
-            print(f"   ✓ CTC head caricata da: {ctc_head_path}")
-        elif pytorch_model_path.exists():
-            # Try loading full model state dict and extract ctc_head
+        if pytorch_model_path.exists():
             state_dict = torch.load(pytorch_model_path, map_location="cpu")
-            ctc_head_state = {k.replace("ctc_head.", ""): v for k, v in state_dict.items() if k.startswith("ctc_head.")}
-            if ctc_head_state:
-                model.ctc_head.load_state_dict(ctc_head_state)
-                print(f"   ✓ CTC head estratta da: {pytorch_model_path}")
+            # Extract lm_head weights
+            lm_head_state = {k.replace("lm_head.", ""): v for k, v in state_dict.items() if k.startswith("lm_head.")}
+            if lm_head_state:
+                model.lm_head.load_state_dict(lm_head_state)
+                print(f"   ✓ lm_head caricata: weight {lm_head_state['weight'].shape}, bias {lm_head_state['bias'].shape}")
             else:
-                print(f"   ⚠️ Nessun CTC head trovato in {pytorch_model_path}")
+                print(f"   ⚠️ Nessun lm_head trovato in {pytorch_model_path}")
         else:
-            print(f"   ⚠️ Nessun file di pesi trovato!")
+            print(f"   ⚠️ Nessun file pytorch_model.bin trovato!")
         
         # Store feature extractor for later use
         whisper_feature_extractor = model.feature_extractor
