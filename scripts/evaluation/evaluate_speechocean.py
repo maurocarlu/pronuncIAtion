@@ -244,9 +244,63 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
         print("   ⚠️ La valutazione potrebbe non essere accurata senza SpeechTokenizer encoder.")
     elif is_whisper_encoder:
         print("   Tipo: Whisper Encoder + CTC")
-        print("   ⚠️ Whisper Encoder richiede mel spectrograms - valutazione semplificata")
-        # Fallback: stampa warning e usa placeholder
-        model = None
+        # Load Whisper Encoder with CTC head
+        vocab_size = config.get("vocab_size", 43)
+        whisper_model_name = config.get("whisper_model_name", "openai/whisper-small")
+        
+        class WhisperEncoderForCTC(nn.Module):
+            def __init__(self, vocab_size: int, whisper_model_name: str = "openai/whisper-small"):
+                super().__init__()
+                from transformers import WhisperModel, WhisperFeatureExtractor
+                
+                self.whisper = WhisperModel.from_pretrained(whisper_model_name)
+                self.feature_extractor = WhisperFeatureExtractor.from_pretrained(whisper_model_name)
+                
+                # Freeze encoder
+                for param in self.whisper.encoder.parameters():
+                    param.requires_grad = False
+                
+                hidden_size = self.whisper.config.d_model
+                self.ctc_head = nn.Sequential(
+                    nn.Linear(hidden_size, hidden_size // 2),
+                    nn.GELU(),
+                    nn.Dropout(0.1),
+                    nn.Linear(hidden_size // 2, vocab_size),
+                )
+            
+            def forward(self, input_features, **kwargs):
+                # Use only encoder
+                encoder_outputs = self.whisper.encoder(input_features)
+                hidden_states = encoder_outputs.last_hidden_state
+                logits = self.ctc_head(hidden_states)
+                return {"logits": logits}
+        
+        model = WhisperEncoderForCTC(vocab_size, whisper_model_name)
+        
+        # Load CTC head weights
+        ctc_head_path = Path(model_path) / "ctc_head.bin"
+        pytorch_model_path = Path(model_path) / "pytorch_model.bin"
+        
+        if ctc_head_path.exists():
+            state_dict = torch.load(ctc_head_path, map_location="cpu")
+            model.ctc_head.load_state_dict(state_dict)
+            print(f"   ✓ CTC head caricata da: {ctc_head_path}")
+        elif pytorch_model_path.exists():
+            # Try loading full model state dict and extract ctc_head
+            state_dict = torch.load(pytorch_model_path, map_location="cpu")
+            ctc_head_state = {k.replace("ctc_head.", ""): v for k, v in state_dict.items() if k.startswith("ctc_head.")}
+            if ctc_head_state:
+                model.ctc_head.load_state_dict(ctc_head_state)
+                print(f"   ✓ CTC head estratta da: {pytorch_model_path}")
+            else:
+                print(f"   ⚠️ Nessun CTC head trovato in {pytorch_model_path}")
+        else:
+            print(f"   ⚠️ Nessun file di pesi trovato!")
+        
+        # Store feature extractor for later use
+        whisper_feature_extractor = model.feature_extractor
+        is_whisper_encoder = True  # Flag for inference
+        
     # For Qwen2-Audio, load dataset FIRST before model to avoid OOM
     # (Qwen2 7B 4-bit uses ~4GB RAM, need room for dataset preprocessing)
     if is_qwen_audio:
@@ -261,7 +315,11 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
         
         print("\n🔄 Conversione fonemi ARPABET → IPA...")
         ds = ds.map(prepare_example)
-        ds = ds.filter(lambda x: len(x["reference_ipa"]) > 0)
+        
+        # Use list-based filter to avoid Arrow memory issues
+        print("Filtering examples with valid IPA...")
+        valid_indices = [i for i, ex in enumerate(ds) if len(ex["reference_ipa"]) > 0]
+        ds = ds.select(valid_indices)
         print(f"✓ Esempi validi: {len(ds)}")
         
         # NOW cast audio (after filter to avoid loading all audio at once)
@@ -331,7 +389,13 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
         except ImportError:
             print("   ⚠️ bitsandbytes non disponibile!")
             model = None
-    else:
+    
+    # Check if model was loaded successfully
+    if model is None:
+        print("\n❌ Impossibile caricare il modello. Uscita.")
+        return None
+    
+    if not is_qwen_audio:  # Qwen already called model.eval() above
         model.eval()
         print("✓ Modello caricato!")
         
@@ -347,7 +411,9 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
         
         print("\n🔄 Conversione fonemi ARPABET → IPA...")
         ds = ds.map(prepare_example)
-        ds = ds.filter(lambda x: len(x["reference_ipa"]) > 0)
+        # Use list-based filter to avoid Arrow memory issues on Kaggle
+        valid_indices = [i for i, ex in enumerate(ds) if len(ex["reference_ipa"]) > 0]
+        ds = ds.select(valid_indices)
         print(f"✓ Esempi validi: {len(ds)}")
     
     # ==========================================================================
@@ -363,6 +429,27 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
             mel_features = []
             for audio in audio_arrays:
                 mel = qwen_feature_extractor(
+                    audio, sampling_rate=16000, return_tensors="pt"
+                ).input_features[0]
+                mel_features.append(mel)
+            # Stack and pad
+            max_len = max(m.shape[-1] for m in mel_features)
+            padded_mels = []
+            for m in mel_features:
+                if m.shape[-1] < max_len:
+                    pad_width = max_len - m.shape[-1]
+                    m = torch.nn.functional.pad(m, (0, pad_width))
+                padded_mels.append(m)
+            input_features = torch.stack(padded_mels)
+            
+            with torch.no_grad():
+                outputs = model(input_features)
+                logits = outputs["logits"]
+        elif is_whisper_encoder:
+            # Whisper Encoder needs mel spectrograms
+            mel_features = []
+            for audio in audio_arrays:
+                mel = whisper_feature_extractor(
                     audio, sampling_rate=16000, return_tensors="pt"
                 ).input_features[0]
                 mel_features.append(mel)
