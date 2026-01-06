@@ -376,4 +376,203 @@ class DiscreteTokenClassifier(nn.Module):
 
 ---
 
+## 8. 🎯 Input Types vs Performance - Critical Analysis
 
+This section summarizes the **critical differences** between model input representations and their impact on performance, based on our benchmark results on SpeechOcean762.
+
+### 📊 Input Type Classification
+
+All models in this benchmark fall into **two categories** based on their input representation:
+
+| Category | Input Format | Feature Extractor | Example Tensor Shape |
+|----------|--------------|-------------------|----------------------|
+| **Raw Waveform** | 1D audio signal | `Wav2Vec2FeatureExtractor` | `(batch, samples)` e.g. `(4, 80000)` |
+| **Mel Spectrogram** | 2D log-mel features | `SeamlessM4TFeatureExtractor` / `WhisperFeatureExtractor` | `(batch, mel_bins, frames)` e.g. `(4, 80, 3000)` |
+
+### 🔬 Model-by-Model Input Details
+
+| Model | Input Type | HuggingFace Key | Sampling Rate | Subsampling Factor |
+|-------|------------|-----------------|---------------|-------------------|
+| **WavLM Base/Large** | Raw Waveform | `input_values` | 16kHz | 320 (audio samples) |
+| **HuBERT Large** | Raw Waveform | `input_values` | 16kHz | 320 (audio samples) |
+| **Wav2Vec2 / XLS-R** | Raw Waveform | `input_values` | 16kHz | 320 (audio samples) |
+| **MMS 1B** | Raw Waveform | `input_values` | 16kHz | 320 (audio samples) |
+| **Wav2Vec2-BERT 2.0** | Mel Spectrogram | `input_features` | 16kHz | 2 (spectrogram frames) |
+| **Whisper Encoder** | Mel Spectrogram | `input_features` | 16kHz | 2 (encoder downsampling) |
+| **Qwen2-Audio** | Mel Spectrogram | `input_features` | 16kHz | Variable |
+
+### ⚡ Preprocessing Code Comparison
+
+#### Raw Waveform Models (WavLM, HuBERT, XLS-R)
+```python
+from transformers import Wav2Vec2FeatureExtractor
+
+feature_extractor = Wav2Vec2FeatureExtractor(
+    feature_size=1,
+    sampling_rate=16000,
+    padding_value=0.0,
+    do_normalize=True,
+    return_attention_mask=False
+)
+
+# Direct audio → model
+inputs = feature_extractor(audio_array, sampling_rate=16000, return_tensors="pt")
+# Returns: {"input_values": tensor(batch, samples)}
+```
+
+#### Mel Spectrogram Models (W2V-BERT, Whisper)
+```python
+from transformers import SeamlessM4TFeatureExtractor  # For W2V-BERT
+from transformers import WhisperFeatureExtractor      # For Whisper
+
+# W2V-BERT 2.0
+feature_extractor = SeamlessM4TFeatureExtractor.from_pretrained("facebook/w2v-bert-2.0")
+inputs = feature_extractor(audio_array, sampling_rate=16000, return_tensors="pt")
+# Returns: {"input_features": tensor(batch, 80, frames)}
+
+# Whisper
+feature_extractor = WhisperFeatureExtractor.from_pretrained("openai/whisper-small")
+inputs = feature_extractor(audio_array, sampling_rate=16000, return_tensors="pt")
+# Returns: {"input_features": tensor(batch, 80, 3000)}  # Fixed 30s window
+```
+
+> **⚠️ CRITICAL**: Using the wrong feature extractor will cause silent failures. The model will run but produce garbage outputs.
+
+---
+
+## 9. 📈 Performance Correlation with Architecture
+
+### Benchmark Results Summary (SpeechOcean762)
+
+| Model | Input Type | CTC Head | PER (HQ) ↓ | Accuracy ↑ | Spearman ρ ↑ |
+|-------|------------|----------|------------|------------|--------------|
+| **HuBERT Large** | Raw Waveform | Built-in | **8.84%** | **91.16%** | 0.509 |
+| WavLM Base | Raw Waveform | Built-in | 14.91% | 85.09% | 0.513 |
+| WavLM Large | Raw Waveform | Built-in | 17.91% | 82.09% | 0.533 |
+| Baseline MLP | Raw Waveform | MLP | 25.92% | 74.08% | 0.574 |
+| XLS-R 300M | Raw Waveform | Built-in | 39.40% | 60.60% | 0.587 |
+| SpeechTokenizer | Discrete Tokens | Transformer | 60.85% | 39.15% | 0.389 |
+| **Wav2Vec2-BERT** | Mel Spectrogram | Built-in | **88.58%** | **11.42%** | 0.271 |
+| **Whisper Encoder** | Mel Spectrogram | Custom Linear | **~237%** | **~-137%** | 0.484 |
+
+### 🔍 Key Observations
+
+#### ✅ Models that WORK (PER < 50%)
+All successful models share these characteristics:
+1. **Raw waveform input** (`input_values`)
+2. **Pre-trained with ASR-compatible objectives** (contrastive learning, masked prediction)
+3. **Built-in CTC head from HuggingFace** (`HubertForCTC`, `WavLMForCTC`, `Wav2Vec2ForCTC`)
+
+#### ❌ Models that FAIL (PER > 80%)
+Failed models share:
+1. **Mel spectrogram input** (`input_features`)
+2. **Different pre-training paradigm** (seq2seq for Whisper, MLM+contrastive for W2V-BERT)
+3. **Custom or misaligned CTC heads**
+
+### 🧪 Root Cause Analysis
+
+#### Why Mel Spectrogram Models Fail
+
+1. **Pre-training Mismatch**
+   - Raw waveform models (Wav2Vec2, HuBERT, WavLM) are pre-trained with **frame-level contrastive objectives**
+   - Their encoders produce representations optimized for **temporal alignment** with CTC
+   - Whisper is pre-trained for **seq2seq generation** (encoder→decoder)
+   - W2V-BERT combines **MLM + contrastive** but its representations may not align well with CTC's monotonic alignment assumption
+
+2. **Subsampling Factor Complexity**
+   - Raw waveform models: Fixed 320x subsampling → 1 frame per 20ms
+   - Spectrogram models: Variable subsampling depending on mel window configuration
+   - Misaligned subsampling causes **label length mismatches** in CTC loss
+
+3. **CTC Decoding Differences**
+   - Built-in HuggingFace CTC heads have proper **blank token handling**
+   - Custom CTC heads may not correctly initialize `blank_id=0`
+   - Whisper encoder's outputs are not frame-aligned (designed for cross-attention with decoder)
+
+---
+
+## 10. 🛠️ CTC Head Implementation Best Practices
+
+Based on our experiments, here are the best practices for CTC heads:
+
+### ✅ Recommended Approach (Working Models)
+
+```python
+# Use HuggingFace built-in CTC model
+from transformers import HubertForCTC
+
+model = HubertForCTC.from_pretrained(
+    "facebook/hubert-large-ls960-ft",
+    vocab_size=43,  # Your IPA vocab size
+    ctc_loss_reduction="mean",
+    ctc_zero_infinity=True,
+    pad_token_id=0,
+    ignore_mismatched_sizes=True,
+)
+
+# CRITICAL: Reinitialize lm_head to prevent CTC collapse
+import torch.nn as nn
+nn.init.normal_(model.lm_head.weight, mean=0.0, std=0.02)
+nn.init.zeros_(model.lm_head.bias)
+```
+
+### ⚠️ Problematic Approach (Failed Models)
+
+```python
+# Custom CTC head on encoder not designed for CTC
+class WhisperEncoderForCTC(nn.Module):
+    def __init__(self, vocab_size):
+        super().__init__()
+        self.encoder = WhisperModel.from_pretrained("openai/whisper-small").encoder
+        self.lm_head = nn.Linear(768, vocab_size)  # Too simple!
+    
+    def forward(self, input_features, labels=None):
+        hidden = self.encoder(input_features).last_hidden_state
+        logits = self.lm_head(hidden)
+        # CTC loss computation...
+```
+
+**Problems**:
+1. Whisper encoder is optimized for decoder attention, not CTC alignment
+2. Simple linear head lacks the regularization of HuggingFace implementations
+3. No dropout between encoder and head
+4. No gradient clipping on CTC loss
+
+### 📋 CTC Head Architecture Comparison
+
+| Model | Head Architecture | Params | Init Strategy | Works? |
+|-------|-------------------|--------|---------------|--------|
+| HuBERT | `Linear(1024→vocab)` | ~44K | HF default + reinit | ✅ |
+| WavLM | `Linear(1024→vocab)` | ~44K | HF default + reinit | ✅ |
+| Wav2Vec2-BERT | `Linear(1024→vocab)` | ~44K | HF default + reinit | ❌ |
+| Whisper | `Dropout(0.1)→Linear(768→vocab)` | ~33K | Xavier uniform | ❌ |
+| Qwen2-Audio | `Linear→GELU→Dropout→Linear` | ~680K | Default | Untested |
+| SpeechTokenizer | `Embedding→Transformer(2L)→Linear` | ~1.4M | Default | ❌ |
+
+---
+
+## 11. 🎓 Lessons Learned
+
+### For Phoneme Recognition with CTC:
+
+1. **Use raw waveform models** (WavLM, HuBERT, Wav2Vec2) - they are designed for frame-level tasks
+2. **Use HuggingFace's built-in CTC classes** (`*ForCTC`) - they handle blank tokens, padding, and loss correctly
+3. **Always reinitialize `lm_head`** with small weights (std=0.02) to prevent CTC collapse
+4. **Avoid mel spectrogram models** for CTC unless you have specific domain knowledge
+5. **Monitor training carefully** - loss around 6-7 after multiple epochs indicates failed learning
+
+### For Future Experiments:
+
+- **Whisper** could work with a **seq2seq approach** (using decoder) instead of CTC
+- **W2V-BERT** might need different preprocessing or learning rate schedules
+- **Qwen2-Audio** is promising for linear probing but requires more training time
+
+---
+
+## 12. 📚 References
+
+- [HuggingFace CTC Documentation](https://huggingface.co/docs/transformers/model_doc/hubert#transformers.HubertForCTC)
+- [CTC Loss Explained](https://distill.pub/2017/ctc/)
+- [SUPERB Benchmark](https://superbbenchmark.org/) - Weighted layer approach
+- [Wav2Vec 2.0 Paper](https://arxiv.org/abs/2006.11477)
+- [W2V-BERT Paper](https://arxiv.org/abs/2108.06209)

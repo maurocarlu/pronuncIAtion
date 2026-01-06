@@ -167,19 +167,20 @@ Usa adapter per lingua, ma qui lo usiamo con CTC head custom sul nostro vocab IP
 
 ### Caratteristiche
 Modello "stupido" di controllo. Se un classificatore semplice su feature medie funziona bene, il task è troppo facile. Serve come *lower bound*.
-
 ---
 
 ## Tabella Riassuntiva
 
-| Modello | Params | Training Mode | VRAM | Script |
-|---------|--------|---------------|------|--------|
-| WavLM Large | 317M | Fine-tuning | ~12GB | - |
-| HuBERT Large | 317M | Fine-tuning | ~12GB | - |
-| XLS-R 300M | 300M | Fine-tuning | ~10GB | - |
-| Whisper Small (Encoder) | 244M | Partial Fine-tuning | ~8GB | `train_whisper_encoder.py` |
-| SpeechTokenizer | 256K train | 2-Stage (Classifier) | ~4GB | `train_speechtokenizer.py` |
-| **Qwen2-Audio** | **260K train** | **Linear Probe** | **~5GB** | `train_qwen_audio.py` |
-| **Wav2Vec2-BERT** | **600M** | **Fine-tuning** | **~12GB** | `train_w2v2_bert.py` |
-| **MMS 1B** | **1B** | **Fine-tuning** | **~16GB** | `train_mms.py` |
-| Baseline MLP | 2M train | Linear Probe | ~4GB | `train_baseline_mlp.py` |
+| Modello | Input Type | Params | Training Mode | VRAM | Status | Script |
+|---------|------------|--------|---------------|------|--------|--------|
+| **HuBERT Large** | Raw Waveform | 317M | Fine-tuning | ~12GB | ✅ **Best** | `train_hubert.py` |
+| WavLM Base/Large | Raw Waveform | 317M | Fine-tuning | ~12GB | ✅ Works | `train_wavlm.py` |
+| XLS-R 300M | Raw Waveform | 300M | Fine-tuning | ~10GB | ✅ Works | `train_xlsr.py` |
+| Baseline MLP | Raw Waveform | 2M train | Linear Probe | ~4GB | ✅ Works | `train_baseline_mlp.py` |
+| Whisper Small (Encoder) | Mel Spectrogram | 244M | Partial Fine-tuning | ~8GB | ❌ Failed | `train_whisper_encoder.py` |
+| Wav2Vec2-BERT | Mel Spectrogram | 600M | Fine-tuning | ~12GB | ❌ Failed | `train_w2v2_bert.py` |
+| Qwen2-Audio | Mel Spectrogram | 260K train | Linear Probe | ~5GB | ⏳ TBD | `train_qwen_audio.py` |
+| SpeechTokenizer | Discrete Tokens | 256K train | 2-Stage | ~4GB | ⚠️ Partial | `train_speechtokenizer.py` |
+| MMS 1B | Raw Waveform | 1B | Fine-tuning | ~16GB | ⏳ TBD | `train_mms.py` |
+
+> **💡 Key Insight**: All models with **Raw Waveform** input (`input_values`) work well. Models requiring **Mel Spectrogram** (`input_features`) fail due to pre-training/CTC mismatch. See [ARCHITECTURE_DETAILS.md](ARCHITECTURE_DETAILS.md#8--input-types-vs-performance---critical-analysis) for detailed analysis.

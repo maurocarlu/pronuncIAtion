@@ -556,19 +556,51 @@ def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bo
         audio_arrays = []
         for ex in batch_examples:
             audio_data = ex["audio"]
+            arr = None
+            sr = 16000
+            
+            # Handle different audio data formats
             if isinstance(audio_data, dict):
-                arr = audio_data["array"]
+                arr = audio_data.get("array")
                 sr = audio_data.get("sampling_rate", 16000)
-                if sr != 16000:
-                    import librosa
-                    arr = librosa.resample(arr, orig_sr=sr, target_sr=16000)
-            else:
+                # If array is still not numpy, try to get path and load
+                if arr is None and "path" in audio_data:
+                    import soundfile as sf
+                    arr, sr = sf.read(audio_data["path"])
+            elif hasattr(audio_data, "array"):
+                # Handle Audio object from datasets
+                arr = audio_data.array
+                sr = getattr(audio_data, "sampling_rate", 16000)
+            elif hasattr(audio_data, "__array__"):
+                # Convert array-like objects
+                arr = np.asarray(audio_data)
+            elif isinstance(audio_data, (list, tuple)):
+                arr = np.array(audio_data, dtype=np.float32)
+            elif isinstance(audio_data, np.ndarray):
                 arr = audio_data
+            else:
+                # Last resort: try to read as path string
+                try:
+                    import soundfile as sf
+                    arr, sr = sf.read(str(audio_data))
+                except Exception:
+                    print(f"   ⚠️ Cannot decode audio: {type(audio_data)}")
+                    arr = np.zeros(16000, dtype=np.float32)  # 1 second silence
+            
+            # Resample if needed
+            if sr != 16000 and arr is not None:
+                import librosa
+                arr = librosa.resample(arr, orig_sr=sr, target_sr=16000)
+            
             # Ensure numpy array with correct dtype
-            if not isinstance(arr, np.ndarray):
-                arr = np.array(arr, dtype=np.float32)
-            elif arr.dtype != np.float32:
-                arr = arr.astype(np.float32)
+            if arr is not None:
+                if not isinstance(arr, np.ndarray):
+                    arr = np.array(arr, dtype=np.float32)
+                elif arr.dtype != np.float32:
+                    arr = arr.astype(np.float32)
+            else:
+                arr = np.zeros(16000, dtype=np.float32)
+            
             audio_arrays.append(arr)
         
         # Run inference

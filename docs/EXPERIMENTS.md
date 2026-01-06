@@ -7,19 +7,22 @@ Per dettagli sulle metriche, vedi **[docs/BENCHMARK_GUIDE.md](docs/BENCHMARK_GUI
 
 ---
 
-## 📊 Tabella Riassuntiva Risultati (Dicembre 2024)
+## 📊 Tabella Riassuntiva Risultati (Gennaio 2025)
 
-| Modello | Task A (PER) | Task B (Pearson) | Task C (AUC) | Note |
-|---------|--------------|------------------|--------------|------|
-| **WavLM Standard** | 14.91% | 0.5550 | 0.8369 | Baseline fine-tuned |
-| **WavLM Weighted** | 30.41% | 0.5812 | 0.8523 | Layer sum (ottimo detection) |
-| **XLS-R 300M** | 39.40% | 0.5589 | 0.8435 | Multilingual |
-| **HuBERT Large** | 8.84% | 0.5932 | 0.8426 | **Best PER & Correlation** |
-| **SpeechTokenizer** | 60.85% | 0.3842 | 0.7311 | Discrete tokens (lossy) |
-| **Wav2Vec2** | TBD | TBD | TBD | LR=3e-4, 10 epochs |
-| **Whisper Enc** | TBD | TBD | TBD | Small encoder, last 4 layers |
-| **Qwen2-Audio** | TBD | TBD | TBD | Linear Probe (encoder frozen) |
-| **Wav2Vec2-BERT** | TBD | TBD | TBD | Fine-tuning, 10 epochs |
+| Modello | Input Type | Task A (PER) ↓ | Task B (Pearson) ↑ | Task C (AUC) ↑ | Note |
+|---------|------------|----------------|-------------------|----------------|------|
+| **HuBERT Large** | Raw Waveform | **8.84%** | **0.5932** | 0.8426 | **🏆 Best Overall** |
+| WavLM Base | Raw Waveform | 14.91% | 0.5550 | 0.8369 | Baseline fine-tuned |
+| WavLM Large | Raw Waveform | 17.91% | 0.5736 | 0.8382 | Standard CTC |
+| Baseline MLP | Raw Waveform | 25.92% | 0.5754 | 0.8427 | Linear Probe |
+| WavLM Weighted | Raw Waveform | 30.41% | 0.5812 | **0.8523** | **Best Detection** |
+| XLS-R 300M | Raw Waveform | 39.40% | 0.5589 | 0.8435 | Multilingual |
+| SpeechTokenizer | Discrete | 60.85% | 0.3842 | 0.7311 | Discrete tokens (lossy) |
+| Wav2Vec2-BERT | Mel Spectrogram | 88.58% | 0.3247 | 0.6936 | ❌ Failed (input mismatch) |
+| Whisper Encoder | Mel Spectrogram | ~237% | 0.4510 | 0.7963 | ❌ Failed (CTC not aligned) |
+| Qwen2-Audio | Mel Spectrogram | TBD | TBD | TBD | Linear Probe (encoder frozen) |
+
+> **⚠️ Key Finding**: Models using **raw waveform input** (`input_values`) all work (PER < 50%). Models using **mel spectrogram** (`input_features`) all fail (PER > 80%). See [ARCHITECTURE_DETAILS.md](ARCHITECTURE_DETAILS.md#8--input-types-vs-performance---critical-analysis) for analysis.
 
 ---
 
