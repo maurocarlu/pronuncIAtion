@@ -386,9 +386,37 @@ def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bo
                     # Load audio manually with librosa from path
                     audio_info = ex["audio"]
                     audio_arr = None
+                    
+                    # Debug first example
+                    if i == 0:
+                        print(f"   [DEBUG] Audio info type: {type(audio_info)}")
+                        if isinstance(audio_info, dict):
+                            print(f"   [DEBUG] Audio keys: {audio_info.keys()}")
+                    
                     if isinstance(audio_info, dict) and "path" in audio_info:
                         try:
                             audio_arr, _ = librosa.load(audio_info["path"], sr=16000)
+                        except Exception as e:
+                            if i == 0:
+                                print(f"   [DEBUG] librosa.load failed: {e}")
+                            # Try bytes if path fails
+                            if "bytes" in audio_info and audio_info["bytes"]:
+                                import io
+                                import soundfile as sf
+                                try:
+                                    audio_arr, sr = sf.read(io.BytesIO(audio_info["bytes"]))
+                                    if sr != 16000:
+                                        audio_arr = librosa.resample(audio_arr, orig_sr=sr, target_sr=16000)
+                                except Exception as e2:
+                                    if i == 0:
+                                        print(f"   [DEBUG] soundfile from bytes failed: {e2}")
+                    elif isinstance(audio_info, dict) and "bytes" in audio_info and audio_info["bytes"]:
+                        import io
+                        import soundfile as sf
+                        try:
+                            audio_arr, sr = sf.read(io.BytesIO(audio_info["bytes"]))
+                            if sr != 16000:
+                                audio_arr = librosa.resample(audio_arr, orig_sr=sr, target_sr=16000)
                         except Exception:
                             pass
                     elif isinstance(audio_info, dict) and "array" in audio_info:
