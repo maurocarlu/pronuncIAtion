@@ -393,7 +393,21 @@ def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bo
                         if isinstance(audio_info, dict):
                             print(f"   [DEBUG] Audio keys: {audio_info.keys()}")
                     
-                    if isinstance(audio_info, dict) and "path" in audio_info:
+                    # Handle TorchCodec AudioDecoder (callable objects)
+                    if hasattr(audio_info, '__call__'):
+                        try:
+                            decoded = audio_info()
+                            if hasattr(decoded, 'data'):
+                                audio_arr = decoded.data.numpy().squeeze()
+                            elif hasattr(decoded, 'array'):
+                                audio_arr = decoded.array
+                            else:
+                                audio_arr = np.asarray(decoded)
+                            # AudioDecoder typically returns 16kHz
+                        except Exception as e:
+                            if i == 0:
+                                print(f"   [DEBUG] AudioDecoder call failed: {e}")
+                    elif isinstance(audio_info, dict) and "path" in audio_info:
                         try:
                             audio_arr, _ = librosa.load(audio_info["path"], sr=16000)
                         except Exception as e:
