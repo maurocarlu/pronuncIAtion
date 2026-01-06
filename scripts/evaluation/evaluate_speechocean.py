@@ -369,11 +369,12 @@ def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bo
     # For Qwen2-Audio
     if is_qwen_audio:
         import gc
+        import librosa
         
         if full_dataset:
             print("\n📥 Caricamento FULL SpeechOcean762...")
             ds_full = load_dataset("mispeech/speechocean762", split="test")
-            ds_full = ds_full.cast_column("audio", Audio(sampling_rate=16000))
+            # Note: NOT casting audio column to avoid TorchCodec issues
             print(f"✓ Caricati {len(ds_full)} esempi")
             
             print("\n🔄 Conversione fonemi ARPABET → IPA...")
@@ -382,13 +383,28 @@ def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bo
                 ex = ds_full[i]
                 ref_ipa = extract_phones_from_words(ex["words"])
                 if len(ref_ipa) > 0:
-                    collected_examples.append({
-                        "audio": ex["audio"],
-                        "reference_ipa": ref_ipa,
-                        "text": ex["text"],
-                        "accuracy": ex["accuracy"],
-                        "age": ex.get("age", 0),
-                    })
+                    # Load audio manually with librosa from path
+                    audio_info = ex["audio"]
+                    audio_arr = None
+                    if isinstance(audio_info, dict) and "path" in audio_info:
+                        try:
+                            audio_arr, _ = librosa.load(audio_info["path"], sr=16000)
+                        except Exception:
+                            pass
+                    elif isinstance(audio_info, dict) and "array" in audio_info:
+                        audio_arr = audio_info["array"]
+                        sr = audio_info.get("sampling_rate", 16000)
+                        if sr != 16000:
+                            audio_arr = librosa.resample(audio_arr, orig_sr=sr, target_sr=16000)
+                    
+                    if audio_arr is not None:
+                        collected_examples.append({
+                            "audio": {"array": audio_arr, "sampling_rate": 16000},
+                            "reference_ipa": ref_ipa,
+                            "text": ex["text"],
+                            "accuracy": ex["accuracy"],
+                            "age": ex.get("age", 0),
+                        })
                 if (i + 1) % 500 == 0:
                     print(f"   Processati {i + 1}/{len(ds_full)} esempi")
             
