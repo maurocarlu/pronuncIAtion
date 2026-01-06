@@ -571,6 +571,18 @@ def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bo
                 # Handle Audio object from datasets
                 arr = audio_data.array
                 sr = getattr(audio_data, "sampling_rate", 16000)
+            elif hasattr(audio_data, "__call__"):
+                # Handle TorchCodec AudioDecoder - call it to decode
+                try:
+                    decoded = audio_data()
+                    if hasattr(decoded, "data"):
+                        arr = decoded.data.numpy().squeeze()
+                    else:
+                        arr = np.asarray(decoded)
+                    sr = 16000
+                except Exception as e:
+                    print(f"   ⚠️ AudioDecoder failed: {e}")
+                    arr = np.zeros(16000, dtype=np.float32)
             elif hasattr(audio_data, "__array__"):
                 # Convert array-like objects
                 arr = np.asarray(audio_data)
@@ -620,6 +632,10 @@ def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bo
                         m = torch.nn.functional.pad(m, (0, pad_width))
                     padded_mels.append(m)
                 input_features = torch.stack(padded_mels)
+                
+                # Convert to half precision if model uses half
+                if next(model.parameters()).dtype == torch.float16:
+                    input_features = input_features.half()
                 
                 with torch.no_grad():
                     outputs = model(input_features)
