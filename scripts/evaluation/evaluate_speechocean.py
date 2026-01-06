@@ -397,16 +397,39 @@ def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bo
                     if hasattr(audio_info, '__call__'):
                         try:
                             decoded = audio_info()
+                            if i == 0:
+                                print(f"   [DEBUG] Decoded type: {type(decoded)}")
+                                if hasattr(decoded, 'data'):
+                                    print(f"   [DEBUG] decoded.data type: {type(decoded.data)}, shape: {decoded.data.shape if hasattr(decoded.data, 'shape') else 'N/A'}")
+                            
                             if hasattr(decoded, 'data'):
-                                audio_arr = decoded.data.numpy().squeeze()
+                                # TorchCodec returns a FrameBatch with data tensor
+                                data = decoded.data
+                                if hasattr(data, 'numpy'):
+                                    audio_arr = data.numpy()
+                                else:
+                                    audio_arr = np.asarray(data)
+                                # Squeeze to 1D if needed (stereo to mono, remove batch dims)
+                                if audio_arr.ndim > 1:
+                                    audio_arr = audio_arr.squeeze()
+                                if audio_arr.ndim > 1:
+                                    audio_arr = audio_arr.mean(axis=0)  # stereo to mono
+                                audio_arr = audio_arr.astype(np.float32)
+                                # Normalize if int16
+                                if audio_arr.max() > 1.0:
+                                    audio_arr = audio_arr / 32768.0
                             elif hasattr(decoded, 'array'):
-                                audio_arr = decoded.array
+                                audio_arr = np.asarray(decoded.array).astype(np.float32)
                             else:
-                                audio_arr = np.asarray(decoded)
-                            # AudioDecoder typically returns 16kHz
+                                audio_arr = np.asarray(decoded).astype(np.float32)
+                            
+                            if i == 0 and audio_arr is not None:
+                                print(f"   [DEBUG] Final audio_arr shape: {audio_arr.shape}, dtype: {audio_arr.dtype}")
                         except Exception as e:
                             if i == 0:
+                                import traceback
                                 print(f"   [DEBUG] AudioDecoder call failed: {e}")
+                                traceback.print_exc()
                     elif isinstance(audio_info, dict) and "path" in audio_info:
                         try:
                             audio_arr, _ = librosa.load(audio_info["path"], sr=16000)
