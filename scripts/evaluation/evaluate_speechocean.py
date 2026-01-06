@@ -562,9 +562,14 @@ def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bo
                 if sr != 16000:
                     import librosa
                     arr = librosa.resample(arr, orig_sr=sr, target_sr=16000)
-                audio_arrays.append(arr)
             else:
-                audio_arrays.append(audio_data)
+                arr = audio_data
+            # Ensure numpy array with correct dtype
+            if not isinstance(arr, np.ndarray):
+                arr = np.array(arr, dtype=np.float32)
+            elif arr.dtype != np.float32:
+                arr = arr.astype(np.float32)
+            audio_arrays.append(arr)
         
         # Run inference
         try:
