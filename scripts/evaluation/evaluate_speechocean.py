@@ -47,7 +47,31 @@ def extract_phones_from_words(words_list: list) -> str:
     return "".join(all_phones_ipa)
 
 
-def evaluate_speechocean(model_path: str, verbose: bool = True):
+def ctc_greedy_decode(token_ids, blank_id: int = 0):
+    """
+    CTC greedy decoding: rimuove blank tokens e collassa token ripetuti.
+    
+    Args:
+        token_ids: Lista o tensor di token IDs
+        blank_id: ID del blank token (default 0 per [PAD])
+    
+    Returns:
+        Lista di token IDs decodificati
+    """
+    if hasattr(token_ids, 'tolist'):
+        token_ids = token_ids.tolist()
+    
+    result = []
+    prev = None
+    for tok in token_ids:
+        # Skip blank tokens and repeated consecutive tokens
+        if tok != blank_id and tok != prev:
+            result.append(tok)
+        prev = tok
+    return result
+
+
+def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bool = False):
     """Valuta modello su SpeechOcean762 con benchmark scientifico completo."""
     from transformers import Wav2Vec2Processor, WavLMForCTC, WavLMModel
     from scipy.stats import pearsonr, spearmanr
@@ -65,6 +89,7 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
     print("\n📋 Configurazione:")
     print(f"   Modello: {model_path}")
     print(f"   Normalizzazione IPA: {normalizer.mode}")
+    print(f"   Dataset completo: {'Sì' if full_dataset else 'No (50 esempi)'}")
     
     # Controlla tipo modello PRIMA di caricare processor
     config_path = Path(model_path) / "config.json"
@@ -75,7 +100,7 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
     is_speechtokenizer = False
     is_whisper_encoder = False
     is_qwen_audio = False
-    is_w2v_bert = False  # Wav2Vec2-BERT 2.0
+    is_w2v_bert = False
     config = {}
     
     if config_path.exists():
@@ -86,16 +111,13 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
         is_speechtokenizer = config.get("model_type") == "speechtokenizer_discrete_ctc"
         is_whisper_encoder = config.get("model_type") == "whisper_encoder_ctc"
         is_qwen_audio = config.get("model_type") == "qwen2_audio_ctc"
-        # Wav2Vec2-BERT 2.0 detection (must come before xlsr check)
         is_w2v_bert = config.get("model_type") == "wav2vec2-bert" or \
                       "wav2vec2bert" in config.get("architectures", [""])[0].lower() or \
                       "w2v-bert" in str(config.get("_name_or_path", "")).lower()
-        # XLS-R usa architettura wav2vec2 (but NOT wav2vec2-bert)
         is_xlsr_model = (not is_w2v_bert) and (
             "wav2vec2" in config.get("architectures", [""])[0].lower() or
             "xlsr" in str(config.get("_name_or_path", "")).lower()
         )
-        # HuBERT detection
         is_hubert_model = config.get("model_type") == "hubert" or \
                           "hubert" in config.get("architectures", [""])[0].lower() or \
                           "hubert" in str(config.get("_name_or_path", "")).lower()
@@ -108,7 +130,6 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
         from transformers import Wav2Vec2CTCTokenizer
         processor = Wav2Vec2CTCTokenizer.from_pretrained(model_path)
     elif is_w2v_bert:
-        # Wav2Vec2-BERT needs Wav2Vec2BertProcessor with SeamlessM4TFeatureExtractor
         from transformers import Wav2Vec2BertProcessor
         processor = Wav2Vec2BertProcessor.from_pretrained(model_path)
     else:
@@ -116,23 +137,19 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
     
     if is_baseline_mlp:
         print("   Tipo: BaselineMLPForCTC (Linear Probe)")
-        # Carica modello Baseline MLP
         vocab_size = config["vocab_size"]
         hidden_dim = config.get("hidden_dim", 256)
         backbone = config.get("backbone", "microsoft/wavlm-base")
         
-        # Definisci classe inline (stesso codice di train_baseline_mlp.py)
-        # NOTA: usa 'wavlm' come nome attributo per matchare il checkpoint salvato
         class BaselineMLPForCTC(nn.Module):
             def __init__(self, vocab_size, hidden_dim=256, backbone_name="microsoft/wavlm-base"):
                 super().__init__()
                 from transformers import WavLMModel
                 self.wavlm = WavLMModel.from_pretrained(backbone_name)
-                # Freeze backbone
                 for param in self.wavlm.parameters():
                     param.requires_grad = False
                 
-                hidden_size = self.wavlm.config.hidden_size  # 768 per wavlm-base
+                hidden_size = self.wavlm.config.hidden_size
                 self.mlp = nn.Sequential(
                     nn.Linear(hidden_size, hidden_dim),
                     nn.ReLU(),
@@ -142,32 +159,22 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
             
             def forward(self, input_values, attention_mask=None, labels=None, **kwargs):
                 outputs = self.wavlm(input_values, attention_mask=attention_mask)
-                hidden_states = outputs.last_hidden_state  # [batch, frames, 768]
-                logits = self.mlp(hidden_states)  # [batch, frames, vocab_size]
+                hidden_states = outputs.last_hidden_state
+                logits = self.mlp(hidden_states)
                 return {"logits": logits}
         
         model = BaselineMLPForCTC(vocab_size, hidden_dim, backbone)
-        
-        # Carica pesi (solo MLP, backbone viene scaricato da HF)
         model_file = Path(model_path) / "pytorch_model.bin"
         state_dict = torch.load(model_file, map_location="cpu")
-        
-        # Carica solo i pesi MLP (il backbone è già inizializzato da from_pretrained)
-        # Filtra per caricare solo mlp.* keys
         mlp_state_dict = {k: v for k, v in state_dict.items() if k.startswith("mlp.")}
         model.mlp.load_state_dict({k.replace("mlp.", ""): v for k, v in mlp_state_dict.items()})
-        
         print(f"   ✓ Pesi MLP caricati da: {model_file}")
-        print(f"   ✓ Backbone: {backbone} (FROZEN, caricato da HuggingFace)")
-        print(f"   ✓ MLP hidden: {hidden_dim}")
         
     elif is_weighted_model:
         print("   Tipo: WavLMWithWeightedLayers (custom)")
-        # Carica modello custom
         vocab_size = config["vocab_size"]
         base_model = config.get("base_model", "microsoft/wavlm-large")
         
-        # Definisci classe inline (stesso codice di train_weighted.py)
         class WavLMWithWeightedLayers(nn.Module):
             def __init__(self, vocab_size, model_name="microsoft/wavlm-large"):
                 super().__init__()
@@ -190,34 +197,34 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
                 return {"logits": logits}
         
         model = WavLMWithWeightedLayers(vocab_size, base_model)
-        
-        # Carica pesi
         model_file = Path(model_path) / "pytorch_model.bin"
         state_dict = torch.load(model_file, map_location="cpu")
         model.load_state_dict(state_dict)
         print(f"   ✓ Pesi caricati da: {model_file}")
+        
     elif is_w2v_bert:
         print("   Tipo: Wav2Vec2BertForCTC (W2V-BERT 2.0)")
         from transformers import Wav2Vec2BertForCTC
         model = Wav2Vec2BertForCTC.from_pretrained(model_path)
+        
     elif is_xlsr_model:
         print("   Tipo: Wav2Vec2ForCTC (XLS-R)")
         from transformers import Wav2Vec2ForCTC
         model = Wav2Vec2ForCTC.from_pretrained(model_path)
+        
     elif is_hubert_model:
         print("   Tipo: HubertForCTC")
         from transformers import HubertForCTC
         model = HubertForCTC.from_pretrained(model_path)
+        
     elif is_speechtokenizer:
         print("   Tipo: SpeechTokenizer (Discrete)")
-        # SpeechTokenizer usa un classificatore custom
         vocab_size = config.get("vocab_size", 100)
         codebook_size = config.get("codebook_size", 1024)
         embed_dim = config.get("embed_dim", 256)
         num_heads = config.get("num_heads", 4)
         num_layers = config.get("num_layers", 2)
         
-        import torch.nn as nn
         class DiscreteTokenClassifier(nn.Module):
             def __init__(self, vocab_size, codebook_size=1024, embed_dim=256, num_heads=4, num_layers=2):
                 super().__init__()
@@ -241,60 +248,86 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
         model.load_state_dict(state_dict)
         print(f"   ✓ Classificatore caricato")
         print("   ⚠️ NOTA: SpeechTokenizer richiede preprocessing audio diverso!")
-        print("   ⚠️ La valutazione potrebbe non essere accurata senza SpeechTokenizer encoder.")
+        
     elif is_whisper_encoder:
         print("   Tipo: Whisper Encoder + CTC")
-        print("   ⚠️ Modalità MINIMAL per Kaggle (50 esempi)...")
         
         # Store config for later model loading
         whisper_vocab_size = config.get("vocab_size", 43)
         whisper_model_name = config.get("whisper_model_name", "openai/whisper-small")
         whisper_model_path = model_path
         
-        # MINIMAL APPROACH: Use only first 50 examples to avoid OOM
-        print("\n📥 Caricamento MINIMAL SpeechOcean762 (50 esempi)...")
         import gc
         
-        # Load with streaming to minimize memory, collect only 50
-        ds_iter = iter(load_dataset("mispeech/speechocean762", split="test", streaming=True))
-        collected_examples = []
-        target_count = 50
-        
-        for i in range(500):  # Check first 500 to find 50 valid
-            try:
-                ex = next(ds_iter)
-            except StopIteration:
-                break
+        if full_dataset:
+            # FULL DATASET MODE
+            print("\n📥 Caricamento FULL SpeechOcean762...")
+            ds_full = load_dataset("mispeech/speechocean762", split="test")
+            ds_full = ds_full.cast_column("audio", Audio(sampling_rate=16000))
+            print(f"✓ Caricati {len(ds_full)} esempi")
             
-            ref_ipa = extract_phones_from_words(ex["words"])
-            if len(ref_ipa) > 0:
-                # Extract audio immediately
-                audio_data = ex["audio"]
-                arr = audio_data["array"]
-                sr = audio_data.get("sampling_rate", 16000)
-                if sr != 16000:
-                    import librosa
-                    arr = librosa.resample(arr, orig_sr=sr, target_sr=16000)
-                
-                collected_examples.append({
-                    "audio": {"array": arr, "sampling_rate": 16000},
-                    "reference_ipa": ref_ipa,
-                    "text": ex["text"],
-                    "accuracy": ex["accuracy"],
-                    "age": ex.get("age", 0),
-                })
-                
-                if len(collected_examples) >= target_count:
+            print("\n🔄 Conversione fonemi ARPABET → IPA...")
+            collected_examples = []
+            for i in range(len(ds_full)):
+                ex = ds_full[i]
+                ref_ipa = extract_phones_from_words(ex["words"])
+                if len(ref_ipa) > 0:
+                    collected_examples.append({
+                        "audio": ex["audio"],
+                        "reference_ipa": ref_ipa,
+                        "text": ex["text"],
+                        "accuracy": ex["accuracy"],
+                        "age": ex.get("age", 0),
+                    })
+                if (i + 1) % 500 == 0:
+                    print(f"   Processati {i + 1}/{len(ds_full)} esempi")
+            
+            del ds_full
+            gc.collect()
+            ds = collected_examples
+            print(f"✓ Dataset pronto: {len(ds)} esempi validi")
+        else:
+            # MINIMAL MODE for Kaggle (50 examples)
+            print("   ⚠️ Modalità MINIMAL (50 esempi). Usa --full per dataset completo.")
+            print("\n📥 Caricamento MINIMAL SpeechOcean762...")
+            
+            ds_iter = iter(load_dataset("mispeech/speechocean762", split="test", streaming=True))
+            collected_examples = []
+            target_count = 50
+            
+            for i in range(500):
+                try:
+                    ex = next(ds_iter)
+                except StopIteration:
                     break
+                
+                ref_ipa = extract_phones_from_words(ex["words"])
+                if len(ref_ipa) > 0:
+                    audio_data = ex["audio"]
+                    arr = audio_data["array"]
+                    sr = audio_data.get("sampling_rate", 16000)
+                    if sr != 16000:
+                        import librosa
+                        arr = librosa.resample(arr, orig_sr=sr, target_sr=16000)
+                    
+                    collected_examples.append({
+                        "audio": {"array": arr, "sampling_rate": 16000},
+                        "reference_ipa": ref_ipa,
+                        "text": ex["text"],
+                        "accuracy": ex["accuracy"],
+                        "age": ex.get("age", 0),
+                    })
+                    
+                    if len(collected_examples) >= target_count:
+                        break
+                
+                if i % 10 == 0:
+                    gc.collect()
             
-            # Aggressive cleanup every 10 examples
-            if i % 10 == 0:
-                gc.collect()
-        
-        del ds_iter
-        gc.collect()
-        ds = collected_examples
-        print(f"✓ Dataset pronto: {len(ds)} esempi")
+            del ds_iter
+            gc.collect()
+            ds = collected_examples
+            print(f"✓ Dataset pronto: {len(ds)} esempi")
         
         # NOW load Whisper model (after dataset is ready)
         print("\n📦 Caricamento Whisper Encoder (post-dataset)...")
@@ -307,7 +340,6 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
                 self.whisper = WhisperModel.from_pretrained(whisper_model_name)
                 self.feature_extractor = WhisperFeatureExtractor.from_pretrained(whisper_model_name)
                 
-                # Freeze encoder
                 for param in self.whisper.encoder.parameters():
                     param.requires_grad = False
                 
@@ -322,7 +354,6 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
         
         model = WhisperEncoderForCTC(whisper_vocab_size, whisper_model_name)
         
-        # Load lm_head weights
         pytorch_model_path = Path(whisper_model_path) / "pytorch_model.bin"
         if pytorch_model_path.exists():
             state_dict = torch.load(pytorch_model_path, map_location="cpu")
@@ -335,52 +366,79 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
         model.eval()
         print("✓ Whisper Encoder caricato!")
         
-    # For Qwen2-Audio, use MINIMAL approach to avoid OOM
+    # For Qwen2-Audio
     if is_qwen_audio:
-        print("\n📥 Caricamento MINIMAL SpeechOcean762 (50 esempi)...")
         import gc
         
-        # Load with streaming, collect only 50 valid examples
-        ds_iter = iter(load_dataset("mispeech/speechocean762", split="test", streaming=True))
-        collected_examples = []
-        target_count = 50
-        
-        for i in range(500):  # Check first 500 to find 50 valid
-            try:
-                ex = next(ds_iter)
-            except StopIteration:
-                break
+        if full_dataset:
+            print("\n📥 Caricamento FULL SpeechOcean762...")
+            ds_full = load_dataset("mispeech/speechocean762", split="test")
+            ds_full = ds_full.cast_column("audio", Audio(sampling_rate=16000))
+            print(f"✓ Caricati {len(ds_full)} esempi")
             
-            ref_ipa = extract_phones_from_words(ex["words"])
-            if len(ref_ipa) > 0:
-                audio_data = ex["audio"]
-                arr = audio_data["array"]
-                sr = audio_data.get("sampling_rate", 16000)
-                if sr != 16000:
-                    import librosa
-                    arr = librosa.resample(arr, orig_sr=sr, target_sr=16000)
-                
-                collected_examples.append({
-                    "audio": {"array": arr, "sampling_rate": 16000},
-                    "reference_ipa": ref_ipa,
-                    "text": ex["text"],
-                    "accuracy": ex["accuracy"],
-                    "age": ex.get("age", 0),
-                })
-                
-                if len(collected_examples) >= target_count:
+            print("\n🔄 Conversione fonemi ARPABET → IPA...")
+            collected_examples = []
+            for i in range(len(ds_full)):
+                ex = ds_full[i]
+                ref_ipa = extract_phones_from_words(ex["words"])
+                if len(ref_ipa) > 0:
+                    collected_examples.append({
+                        "audio": ex["audio"],
+                        "reference_ipa": ref_ipa,
+                        "text": ex["text"],
+                        "accuracy": ex["accuracy"],
+                        "age": ex.get("age", 0),
+                    })
+                if (i + 1) % 500 == 0:
+                    print(f"   Processati {i + 1}/{len(ds_full)} esempi")
+            
+            del ds_full
+            gc.collect()
+            ds = collected_examples
+            print(f"✓ Dataset pronto: {len(ds)} esempi validi")
+        else:
+            print("\n📥 Caricamento MINIMAL SpeechOcean762 (50 esempi)...")
+            
+            ds_iter = iter(load_dataset("mispeech/speechocean762", split="test", streaming=True))
+            collected_examples = []
+            target_count = 50
+            
+            for i in range(500):
+                try:
+                    ex = next(ds_iter)
+                except StopIteration:
                     break
+                
+                ref_ipa = extract_phones_from_words(ex["words"])
+                if len(ref_ipa) > 0:
+                    audio_data = ex["audio"]
+                    arr = audio_data["array"]
+                    sr = audio_data.get("sampling_rate", 16000)
+                    if sr != 16000:
+                        import librosa
+                        arr = librosa.resample(arr, orig_sr=sr, target_sr=16000)
+                    
+                    collected_examples.append({
+                        "audio": {"array": arr, "sampling_rate": 16000},
+                        "reference_ipa": ref_ipa,
+                        "text": ex["text"],
+                        "accuracy": ex["accuracy"],
+                        "age": ex.get("age", 0),
+                    })
+                    
+                    if len(collected_examples) >= target_count:
+                        break
+                
+                if i % 10 == 0:
+                    gc.collect()
             
-            if i % 10 == 0:
-                gc.collect()
-        
-        del ds_iter
-        gc.collect()
-        ds = collected_examples
-        print(f"✓ Dataset pronto: {len(ds)} esempi")
+            del ds_iter
+            gc.collect()
+            ds = collected_examples
+            print(f"✓ Dataset pronto: {len(ds)} esempi")
         
         # Now load Qwen2 model
-        print("\n📦 Caricamento Qwen2-Audio (post-dataset preprocessing)...")
+        print("\n📦 Caricamento Qwen2-Audio...")
         vocab_size = config.get("vocab_size", 43)
         
         class Qwen2AudioEncoderForCTC(nn.Module):
@@ -449,7 +507,7 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
         print("\n❌ Impossibile caricare il modello. Uscita.")
         return None
     
-    if not is_qwen_audio and not is_whisper_encoder:  # These already loaded dataset above
+    if not is_qwen_audio and not is_whisper_encoder:
         model.eval()
         print("✓ Modello caricato!")
         
@@ -487,9 +545,8 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
     # ==========================================================================
     print("\n🔄 Esecuzione inferenza con confidence scoring...")
     
-    # ds is now a Python list, process in batches manually
     batch_size = 4
-    results = []  # Will store processed examples
+    results = []
     
     for batch_start in range(0, len(ds), batch_size):
         batch_end = min(batch_start + batch_size, len(ds))
@@ -499,11 +556,9 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
         audio_arrays = []
         for ex in batch_examples:
             audio_data = ex["audio"]
-            # Handle both dict format (from streaming) and array format
             if isinstance(audio_data, dict):
                 arr = audio_data["array"]
                 sr = audio_data.get("sampling_rate", 16000)
-                # Resample if needed
                 if sr != 16000:
                     import librosa
                     arr = librosa.resample(arr, orig_sr=sr, target_sr=16000)
@@ -520,7 +575,6 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
                         audio, sampling_rate=16000, return_tensors="pt"
                     ).input_features[0]
                     mel_features.append(mel)
-                # Stack and pad
                 max_len = max(m.shape[-1] for m in mel_features)
                 padded_mels = []
                 for m in mel_features:
@@ -540,7 +594,6 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
                         audio, sampling_rate=16000, return_tensors="pt"
                     ).input_features[0]
                     mel_features.append(mel)
-                # Stack and pad
                 max_len = max(m.shape[-1] for m in mel_features)
                 padded_mels = []
                 for m in mel_features:
@@ -571,9 +624,23 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
                     else:
                         logits = outputs.logits
             
-            # Predictions
+            # Predictions - use proper CTC decoding for Whisper/Qwen
             predicted_ids = torch.argmax(logits, dim=-1)
-            predicted_texts = processor.batch_decode(predicted_ids)
+            
+            # Apply CTC greedy decoding for models that need it
+            if is_whisper_encoder or is_qwen_audio:
+                # Decode each sequence with CTC blank/repeat collapsing
+                predicted_texts = []
+                for seq in predicted_ids:
+                    decoded_ids = ctc_greedy_decode(seq, blank_id=0)
+                    if decoded_ids:
+                        text = processor.decode(decoded_ids, skip_special_tokens=True)
+                    else:
+                        text = ""
+                    predicted_texts.append(text)
+            else:
+                # Standard decoding for wav2vec/wavlm/hubert
+                predicted_texts = processor.batch_decode(predicted_ids)
             
             # Confidence scores
             probs = F.softmax(logits, dim=-1)
@@ -581,7 +648,8 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
             
             for i, ex in enumerate(batch_examples):
                 # Calculate confidence
-                non_pad_mask = predicted_ids[i] != processor.tokenizer.pad_token_id
+                pad_token_id = getattr(processor, 'pad_token_id', None) or getattr(getattr(processor, 'tokenizer', None), 'pad_token_id', 0)
+                non_pad_mask = predicted_ids[i] != pad_token_id
                 if non_pad_mask.sum() > 0:
                     conf = max_probs[i][non_pad_mask].mean().item()
                 else:
@@ -598,7 +666,6 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
                 })
         except Exception as e:
             print(f"   ⚠️ Errore batch {batch_start}-{batch_end}: {e}")
-            # Add placeholder results for failed batch
             for ex in batch_examples:
                 results.append({
                     "predicted_ipa": "",
@@ -618,7 +685,6 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
     print("\n📊 Preparazione dati per analisi...")
     cer_metric = evaluate.load("cer")
     
-    # Raccogli tutti i dati
     all_data = []
     for i in range(len(results)):
         pred = normalizer.normalize(results[i]["predicted_ipa"])
@@ -627,7 +693,6 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
         if not pred or not ref:
             continue
         
-        # Calcola PER singolo
         per = cer_metric.compute(predictions=[pred], references=[ref])
         
         all_data.append({
@@ -641,6 +706,10 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
         })
     
     print(f"   Esempi validi per analisi: {len(all_data)}")
+    
+    if len(all_data) < 2:
+        print("\n❌ Non ci sono abbastanza esempi validi per l'analisi!")
+        return None
     
     # Converti in arrays
     human_scores = np.array([d["human_score"] for d in all_data])
@@ -657,7 +726,6 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
     print("              il modello trascriva correttamente i fonemi.")
     print("-" * 70)
     
-    # Filtra solo high quality
     high_quality_mask = human_scores >= 8
     high_quality_preds = [d["pred"] for d, m in zip(all_data, high_quality_mask) if m]
     high_quality_refs = [d["ref"] for d, m in zip(all_data, high_quality_mask) if m]
@@ -671,7 +739,6 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
         print(f"   PER:      {per_high * 100:.2f}%")
         print(f"   Accuracy: {(1 - per_high) * 100:.2f}%")
         
-        # Breakdown per fascia
         for threshold in [8, 9, 10]:
             mask = human_scores == threshold
             preds = [d["pred"] for d, m in zip(all_data, mask) if m]
@@ -684,7 +751,7 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
         per_high = 1.0
     
     # ==========================================================================
-    # TASK B: SCORING CORRELATION (Intero Dataset)
+    # TASK B: SCORING CORRELATION
     # ==========================================================================
     print("\n" + "=" * 70)
     print("📋 TASK B: SCORING CORRELATION (PER vs Human Score)")
@@ -694,11 +761,9 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
     print("   Metrica principale: (1 - PER) ↔ Human Score")
     print("-" * 70)
     
-    # Correlazione PER (metrica principale)
     pearson_per, pearson_per_p = pearsonr(1 - pers, human_scores)
     spearman_per, spearman_per_p = spearmanr(1 - pers, human_scores)
     
-    # Correlazione confidence (metrica secondaria)
     pearson_conf, pearson_conf_p = pearsonr(confidence_scores, human_scores)
     spearman_conf, spearman_conf_p = spearmanr(confidence_scores, human_scores)
     
@@ -712,7 +777,6 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
     print(f"   Pearson:  r = {pearson_conf:.4f} (p = {pearson_conf_p:.2e})")
     print(f"   Spearman: ρ = {spearman_conf:.4f} (p = {spearman_conf_p:.2e})")
     
-    # Interpretazione basata su PER (metrica principale)
     if abs(spearman_per) >= 0.7:
         interp = "✅ FORTE correlazione - il PER discrimina bene"
     elif abs(spearman_per) >= 0.5:
@@ -724,7 +788,7 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
     print(f"\n   Interpretazione PER: {interp}")
     
     # ==========================================================================
-    # TASK C: MISPRONUNCIATION DETECTION (Classificazione Binaria)
+    # TASK C: MISPRONUNCIATION DETECTION
     # ==========================================================================
     print("\n" + "=" * 70)
     print("📋 TASK C: MISPRONUNCIATION DETECTION (PER-based Classification)")
@@ -735,18 +799,11 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
     print("   Logica: Alto PER → Alta probabilità di errore di pronuncia")
     print("-" * 70)
     
-    # Crea label binarie
-    # 1 = Pronuncia Errata (score <= 6), 0 = Pronuncia Corretta (score > 6)
     y_true = (human_scores <= 6).astype(int)
-    
-    # Usa PER come score predittivo
-    # Alto PER → alta probabilità di errore (no inversione necessaria)
     y_prob = pers
     
-    # Trova soglia ottimale usando F1
     from sklearn.metrics import precision_recall_curve
     
-    # Test multiple thresholds
     thresholds_to_test = np.arange(0.05, 0.50, 0.01)
     best_f1 = 0
     best_threshold = 0.10
@@ -760,14 +817,12 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
             best_f1 = f1_temp
             best_threshold = thresh
     
-    # Applica soglia ottimale
     y_pred = (pers >= best_threshold).astype(int)
     
-    # Metriche
     try:
         auc_roc = roc_auc_score(y_true, y_prob)
     except ValueError:
-        auc_roc = 0.5  # Default se una sola classe presente
+        auc_roc = 0.5
     
     precision, recall, f1, _ = precision_recall_fscore_support(
         y_true, y_pred, average='binary', zero_division=0
@@ -775,7 +830,6 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
     
     accuracy = ((y_pred == y_true).sum()) / len(y_true)
     
-    # Conta distribuzione
     n_correct = (y_true == 0).sum()
     n_incorrect = (y_true == 1).sum()
     
@@ -796,7 +850,6 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
     print(f"   Recall:    {recall:.4f}")
     print(f"   F1-Score:  {f1:.4f}")
     
-    # Interpretazione AUC
     if auc_roc >= 0.8:
         auc_interp = "✅ OTTIMO - classificatore affidabile"
     elif auc_roc >= 0.7:
@@ -807,7 +860,6 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
         auc_interp = "❌ SCARSO - classificatore poco affidabile"
     print(f"\n   Interpretazione AUC: {auc_interp}")
     
-    # Confusion matrix summary
     tp = ((y_pred == 1) & (y_true == 1)).sum()
     tn = ((y_pred == 0) & (y_true == 0)).sum()
     fp = ((y_pred == 1) & (y_true == 0)).sum()
@@ -843,7 +895,6 @@ def evaluate_speechocean(model_path: str, verbose: bool = True):
    └─────────────────────────────────────────────────────────────────┘
     """)
     
-    # Esempi (opzionale)
     if verbose:
         print("\n" + "=" * 70)
         print("📝 ESEMPI DI PREDIZIONI")
@@ -888,9 +939,14 @@ def main():
         action="store_true",
         help="Reduce verbosity (no examples)"
     )
+    parser.add_argument(
+        "--full",
+        action="store_true",
+        help="Use full dataset (default: 50 examples for Kaggle)"
+    )
     
     args = parser.parse_args()
-    evaluate_speechocean(args.model_path, verbose=not args.quiet)
+    evaluate_speechocean(args.model_path, verbose=not args.quiet, full_dataset=args.full)
 
 
 if __name__ == "__main__":
