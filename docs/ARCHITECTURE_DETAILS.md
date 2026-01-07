@@ -292,7 +292,7 @@ Questa operazione è sicura perché le differenze sono solo nei bordi di silenzi
 
 ---
 
-## 6b. Early Fusion via Feature Concatenation ⭐ NEW
+## 6b. Early Fusion via Feature Concatenation ⭐ UPDATED
 
 ### 🎯 Motivazione
 
@@ -300,17 +300,17 @@ A differenza della Late Fusion che combina le predizioni finali, la Early Fusion
 
 **Vantaggio**: Il modello può imparare a pesare dinamicamente le feature HuBERT e WavLM in base al contesto acustico specifico.
 
-### 🏗️ Architettura Multi-Backbone
+### 🏗️ Architettura Multi-Backbone (Aggiornata)
 
 ```mermaid
 flowchart LR
-    A[Audio 16kHz] --> B[HuBERT Large<br/>frozen]
-    A --> C[WavLM Weighted<br/>frozen]
+    A[Audio 16kHz] --> B[HuBERT Large<br/>frozen, fine-tuned]
+    A --> C[WavLM Base<br/>frozen, fine-tuned]
     B --> D[Hidden 1024D]
-    C --> E[Hidden 1024D]
+    C --> E[Hidden 768D]
     D --> F[Concat]
     E --> F
-    F --> G[2048D Features]
+    F --> G[1792D Features]
     G --> H[Dropout 0.1]
     H --> I[Linear CTC Head]
     I --> J[Phonemes IPA]
@@ -320,50 +320,50 @@ flowchart LR
 
 ```python
 class EarlyFusionModel(nn.Module):
-    def __init__(self, vocab_size=43):
+    def __init__(self, vocab_size=45):
         super().__init__()
-        # Backbone 1: HuBERT (frozen)
-        self.hubert = HubertModel.from_pretrained("facebook/hubert-large-ls960-ft")
+        # Backbone 1: HuBERT (frozen, può caricare da ForCTC fine-tuned)
+        # Lo script estrae automaticamente encoder da HubertForCTC
+        self.hubert = HubertModel.from_pretrained("your_finetuned_hubert")
         for p in self.hubert.parameters():
             p.requires_grad = False
         
-        # Backbone 2: WavLM (frozen, weighted layer sum)
-        self.wavlm = WavLMModel.from_pretrained("microsoft/wavlm-large")
+        # Backbone 2: WavLM Base (frozen, può caricare da ForCTC fine-tuned)
+        # Lo script estrae automaticamente encoder da WavLMForCTC
+        self.wavlm = WavLMModel.from_pretrained("your_finetuned_wavlm")
         for p in self.wavlm.parameters():
             p.requires_grad = False
-        self.layer_weights = nn.Parameter(torch.zeros(25))  # apprendibile!
         
         # CTC Head (unico trainable)
         self.dropout = nn.Dropout(0.1)
-        self.ctc_head = nn.Linear(2048, vocab_size)  # 1024+1024
+        self.ctc_head = nn.Linear(1792, vocab_size)  # 1024+768
     
     def forward(self, audio):
         # Estrai feature da entrambi
         h_hubert = self.hubert(audio).last_hidden_state  # [B, T, 1024]
-        h_wavlm = self._weighted_wavlm(audio)            # [B, T, 1024]
+        h_wavlm = self.wavlm(audio).last_hidden_state    # [B, T, 768]
         
         # Concatenazione Early Fusion
-        combined = torch.cat([h_hubert, h_wavlm], dim=-1)  # [B, T, 2048]
+        combined = torch.cat([h_hubert, h_wavlm], dim=-1)  # [B, T, 1792]
         
         # CTC
         logits = self.ctc_head(self.dropout(combined))
         return logits
 ```
 
-### ⚠️ Considerazioni Memoria
+### ⚠️ Considerazioni Memoria (AGGIORNATE)
 
 | Configurazione | VRAM Stimata |
 |----------------|--------------|
-| fp32, no checkpointing | ~32GB ❌ |
-| fp16, no checkpointing | ~24GB ⚠️ |
-| fp16 + gradient checkpointing | ~18-20GB ✅ |
-| fp16 + checkpointing + batch=1 | ~14GB ✅ |
+| HuBERT Large + WavLM **Large** | ~16-20GB ❌ |
+| HuBERT Large + WavLM **Base** + fp16 | ~10-12GB ✅ |
+| HuBERT Large + WavLM **Base** + **4-bit** | ~6-8GB ✅ |
 
 **Raccomandazioni**:
-- Usare sempre `fp16=True`
-- Abilitare `gradient_checkpointing_enable()` su entrambi i backbone
-- Batch size 2 con gradient accumulation 8
-- Training su GPU con ≥20GB VRAM (A100, RTX 3090+)
+- Usare `WavLM Base` invece di Large per ridurre VRAM
+- Abilitare 4-bit quantization (`bitsandbytes`) per backbone frozen
+- Usare encoder già fine-tuned con `--wavlm-path` e `--hubert-path`
+- Training fattibile su T4 (16GB) con batch_size=1, gradient_accumulation=16
 
 ---
 

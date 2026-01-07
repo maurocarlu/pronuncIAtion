@@ -79,23 +79,25 @@ Combinazione dei due top-performer a livello logit:
 
 **Script**: `scripts/evaluation/evaluate_hubert_fusion.py`
 
-### Early Fusion Multi-Backbone
+### Early Fusion Multi-Backbone (UPDATED)
 
 | Parametro | Valore |
 |-----------|--------|
-| Backbone | HuBERT + WavLM (frozen) |
-| Features | 1024 + 1024 = 2048D |
-| CTC Head | Linear(2048, 43) |
+| Backbone 1 | HuBERT Large (frozen, fine-tuned encoder) |
+| Backbone 2 | WavLM Base (frozen, fine-tuned encoder) |
+| Features | 1024 + 768 = 1792D |
+| CTC Head | Linear(1792, 45) |
 | fp16 | ✓ |
-| Gradient Checkpointing | ✓ |
-| VRAM stimata | ~20GB |
+| 4-bit quantization | ✓ (bitsandbytes) |
+| VRAM stimata | ~8-10GB |
 
-**Sfide memoria**: Due modelli Large contemporaneamente richiedono:
-- fp16 obbligatorio
-- Batch size ridotto (2)
-- Gradient accumulation alto (8)
+**Ottimizzazioni memoria**: 
+- WavLM Base invece di Large (~95M vs ~317M)
+- 4-bit quantization per backbone frozen
+- Supporto per encoder già fine-tuned (estrazione automatica da ForCTC)
 
 **Script**: `scripts/training/train_early_fusion.py`
+**Args**: `--wavlm-path <your_checkpoint>` `--hubert-path <your_checkpoint>`
 
 ---
 

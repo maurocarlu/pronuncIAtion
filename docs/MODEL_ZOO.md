@@ -183,32 +183,33 @@ Pesi testati: α ∈ {0.3, 0.5, 0.7}
 
 ---
 
-## 11. Early Fusion (Multi-Backbone) ⭐ NEW
+## 11. Early Fusion (Multi-Backbone) ⭐ UPDATED
 
 | Parametro | Valore |
 |-----------|--------|
-| **Backbone 1** | HuBERT Large (frozen) |
-| **Backbone 2** | WavLM Large Weighted (frozen) |
-| **Concatenazione** | 1024 + 1024 = 2048D |
-| **CTC Head** | Linear(2048, vocab_size) |
-| **VRAM** | ~20GB (fp16 + gradient checkpointing) |
+| **Backbone 1** | HuBERT Large (frozen, fine-tuned encoder) |
+| **Backbone 2** | WavLM Base (frozen, fine-tuned encoder) |
+| **Concatenazione** | 1024 + 768 = 1792D |
+| **CTC Head** | Linear(1792, vocab_size) |
+| **VRAM** | ~8-10GB (con 4-bit quantization) |
 
 ### Architettura
 ```
-Audio → HuBERT → 1024D ─┐
-                         ├→ concat(2048D) → CTC Head → Phonemes
-Audio → WavLM  → 1024D ─┘
+Audio → HuBERT Large → 1024D ─┐
+                               ├→ concat(1792D) → CTC Head → Phonemes
+Audio → WavLM Base  → 768D ──┘
 ```
 
 ### Caratteristiche
-Il classificatore ha accesso simultaneo a:
-- Rappresentazioni fonetiche (HuBERT)
-- Rappresentazioni acustiche (WavLM)
-
-Può pesare dinamicamente le feature in base al contesto.
+- Usa i **tuoi encoder già fine-tuned** per phoneme recognition
+- Solo la CTC head viene trainata (frozen backbones)
+- Supporta 4-bit quantization per ridurre VRAM
+- Il classificatore ha accesso simultaneo a rappresentazioni fonetiche (HuBERT) e acustiche (WavLM)
 
 ### Script
 - Training: `scripts/training/train_early_fusion.py`
+- Argomenti custom: `--wavlm-path` e `--hubert-path` per usare checkpoint fine-tuned
+
 
 ---
 
@@ -232,7 +233,7 @@ Modello "stupido" di controllo. Se un classificatore semplice su feature medie f
 | **HuBERT Large** | Raw Waveform | 317M | Fine-tuning | ~12GB | ✅ **Best PER** | `train_hubert.py` |
 | **WavLM Weighted** | Raw Waveform | 317M | Fine-tuning | ~12GB | ✅ **Best AUC** | `train_weighted.py` |
 | **Late Fusion** | Raw Waveform | 634M | Inference Only | ~16GB | 🆕 NEW | `evaluate_hubert_fusion.py` |
-| **Early Fusion** | Raw Waveform | 634M+2K | Frozen+CTC | ~20GB | 🆕 NEW | `train_early_fusion.py` |
+| **Early Fusion** | Raw Waveform | 413M+2K | Frozen+CTC | ~8GB | 🆕 UPDATED | `train_early_fusion.py` |
 | WavLM Base/Large | Raw Waveform | 317M | Fine-tuning | ~12GB | ✅ Works | `train_wavlm.py` |
 | XLS-R 300M | Raw Waveform | 300M | Fine-tuning | ~10GB | ✅ Works | `train_xlsr.py` |
 | Baseline MLP | Raw Waveform | 2M train | Linear Probe | ~4GB | ✅ Works | `train_baseline_mlp.py` |

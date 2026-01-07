@@ -331,6 +331,15 @@ class EarlyFusionModel(nn.Module):
                 - logits: Predizioni [batch, time, vocab]
                 - loss: CTC loss (se labels forniti)
         """
+        # Convert input to model dtype (important for 4-bit quantized models)
+        # Get the dtype from the first parameter of hubert
+        target_dtype = next(self.hubert.parameters()).dtype
+        if input_values.dtype != target_dtype:
+            input_values = input_values.to(target_dtype)
+        if attention_mask is not None and attention_mask.dtype != target_dtype:
+            # attention_mask should stay as the original type for most models
+            pass  # Keep attention_mask as-is
+        
         # HuBERT forward
         outputs_h = self.hubert(
             input_values,
