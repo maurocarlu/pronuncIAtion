@@ -539,6 +539,10 @@ class EarlyFusionTrainerWrapper:
         
         base_path = Path(audio_base)
         
+        # Store references to avoid pickle issues with self
+        processor = self.processor
+        tokenizer = self.tokenizer
+        
         def preprocess(batch):
             audio_path = str(batch.get("audio_path", "")).replace("\\", "/")
             full_path = base_path / audio_path
@@ -549,7 +553,7 @@ class EarlyFusionTrainerWrapper:
             except Exception:
                 audio = np.zeros(16000, dtype=np.float32)
             
-            inputs = self.processor(
+            inputs = processor(
                 audio,
                 sampling_rate=16000,
                 return_tensors=None,
@@ -559,7 +563,7 @@ class EarlyFusionTrainerWrapper:
             ipa = batch.get("ipa_clean", "")
             if not ipa or (isinstance(ipa, float) and np.isnan(ipa)):
                 ipa = ""
-            batch["labels"] = self.tokenizer(str(ipa)).input_ids
+            batch["labels"] = tokenizer(str(ipa)).input_ids
             
             return batch
         
@@ -569,6 +573,7 @@ class EarlyFusionTrainerWrapper:
             remove_columns=splits["train"].column_names,
             desc="Train preprocessing",
             num_proc=1,
+            load_from_cache_file=False,  # Avoid pickle serialization issues
         )
         
         print("\n🔄 Preprocessing VAL set...")
@@ -577,6 +582,7 @@ class EarlyFusionTrainerWrapper:
             remove_columns=splits["test"].column_names,
             desc="Val preprocessing",
             num_proc=1,
+            load_from_cache_file=False,  # Avoid pickle serialization issues
         )
         print("✓ Preprocessing completato!\n")
     
