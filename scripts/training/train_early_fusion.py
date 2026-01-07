@@ -191,16 +191,39 @@ class EarlyFusionModel(nn.Module):
         print(f"   Weighted WavLM: {use_weighted_wavlm}")
         print(f"   Freeze backbones: {freeze_backbones}")
         
+        # 4-bit quantization per ridurre VRAM
+        use_4bit = freeze_backbones  # Solo se frozen
+        if use_4bit:
+            try:
+                from transformers import BitsAndBytesConfig
+                bnb_config = BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_quant_type="nf4",
+                    bnb_4bit_compute_dtype=torch.float16,
+                    bnb_4bit_use_double_quant=True,
+                )
+                print(f"   4-bit quantization: ENABLED")
+            except ImportError:
+                print(f"   ⚠️ bitsandbytes not installed, using fp16")
+                bnb_config = None
+                use_4bit = False
+        else:
+            bnb_config = None
+        
         # Carica HuBERT
         self.hubert = HubertModel.from_pretrained(
             hubert_name,
             output_hidden_states=False,
+            quantization_config=bnb_config if use_4bit else None,
+            torch_dtype=torch.float16 if not use_4bit else None,
         )
         
         # Carica WavLM
         self.wavlm = WavLMModel.from_pretrained(
             wavlm_name,
             output_hidden_states=use_weighted_wavlm,
+            quantization_config=bnb_config if use_4bit else None,
+            torch_dtype=torch.float16 if not use_4bit else None,
         )
         
         # Weighted Layer Sum per WavLM
