@@ -157,7 +157,62 @@ Usa adapter per lingua, ma qui lo usiamo con CTC head custom sul nostro vocab IP
 
 ---
 
-## 10. Baseline MLP (Linear Probe)
+## 10. Late Fusion (HuBERT + WavLM) ⭐ NEW
+
+| Parametro | Valore |
+|-----------|--------|
+| **Modello A** | HuBERT Large (Best PER: 8.84%) |
+| **Modello B** | WavLM Weighted (Best AUC: 0.8523) |
+| **Strategia** | Logit-level ensemble |
+| **VRAM** | ~16GB (2x Large models) |
+
+### Formula
+```
+final_logits = α × logits_HuBERT + (1-α) × logits_WavLM
+```
+
+### Caratteristiche
+Combina i due top-performer senza re-training:
+- **HuBERT**: Pre-training con target discreti → trascrizione precisa
+- **WavLM Weighted**: Pre-training con denoising → detection robusta
+
+Pesi testati: α ∈ {0.3, 0.5, 0.7}
+
+### Script
+- Evaluation: `scripts/evaluation/evaluate_hubert_fusion.py`
+
+---
+
+## 11. Early Fusion (Multi-Backbone) ⭐ NEW
+
+| Parametro | Valore |
+|-----------|--------|
+| **Backbone 1** | HuBERT Large (frozen) |
+| **Backbone 2** | WavLM Large Weighted (frozen) |
+| **Concatenazione** | 1024 + 1024 = 2048D |
+| **CTC Head** | Linear(2048, vocab_size) |
+| **VRAM** | ~20GB (fp16 + gradient checkpointing) |
+
+### Architettura
+```
+Audio → HuBERT → 1024D ─┐
+                         ├→ concat(2048D) → CTC Head → Phonemes
+Audio → WavLM  → 1024D ─┘
+```
+
+### Caratteristiche
+Il classificatore ha accesso simultaneo a:
+- Rappresentazioni fonetiche (HuBERT)
+- Rappresentazioni acustiche (WavLM)
+
+Può pesare dinamicamente le feature in base al contesto.
+
+### Script
+- Training: `scripts/training/train_early_fusion.py`
+
+---
+
+## 12. Baseline MLP (Linear Probe)
 
 | Parametro | Valore |
 |-----------|--------|
@@ -167,13 +222,17 @@ Usa adapter per lingua, ma qui lo usiamo con CTC head custom sul nostro vocab IP
 
 ### Caratteristiche
 Modello "stupido" di controllo. Se un classificatore semplice su feature medie funziona bene, il task è troppo facile. Serve come *lower bound*.
+
 ---
 
 ## Tabella Riassuntiva
 
 | Modello | Input Type | Params | Training Mode | VRAM | Status | Script |
 |---------|------------|--------|---------------|------|--------|--------|
-| **HuBERT Large** | Raw Waveform | 317M | Fine-tuning | ~12GB | ✅ **Best** | `train_hubert.py` |
+| **HuBERT Large** | Raw Waveform | 317M | Fine-tuning | ~12GB | ✅ **Best PER** | `train_hubert.py` |
+| **WavLM Weighted** | Raw Waveform | 317M | Fine-tuning | ~12GB | ✅ **Best AUC** | `train_weighted.py` |
+| **Late Fusion** | Raw Waveform | 634M | Inference Only | ~16GB | 🆕 NEW | `evaluate_hubert_fusion.py` |
+| **Early Fusion** | Raw Waveform | 634M+2K | Frozen+CTC | ~20GB | 🆕 NEW | `train_early_fusion.py` |
 | WavLM Base/Large | Raw Waveform | 317M | Fine-tuning | ~12GB | ✅ Works | `train_wavlm.py` |
 | XLS-R 300M | Raw Waveform | 300M | Fine-tuning | ~10GB | ✅ Works | `train_xlsr.py` |
 | Baseline MLP | Raw Waveform | 2M train | Linear Probe | ~4GB | ✅ Works | `train_baseline_mlp.py` |

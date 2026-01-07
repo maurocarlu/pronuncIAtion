@@ -256,8 +256,29 @@ La fusione avviene a livello di **logits** (prima della softmax), per preservare
 
 $$ P(y|x) = \text{CTC\_Decode}(\alpha \cdot L_A + (1-\alpha) \cdot L_B) $$
 
+### Late Fusion "Dream Team" (HuBERT + WavLM)
+
+Combina i due top-performer del benchmark:
+
+| Modello | Punto di Forza | Metrica |
+|---------|----------------|---------|
+| **HuBERT Large** | Trascrizione precisa | Best PER: 8.84% |
+| **WavLM Weighted** | Detection errori | Best AUC: 0.8523 |
+
+```python
+# Predizioni separate
+logits_h = hubert(audio)   # [batch, time, vocab]
+logits_w = wavlm(audio)    # [batch, time, vocab]
+
+# Late Fusion
+logits_fused = alpha * logits_h + (1 - alpha) * logits_w
+
+# Decodifica
+prediction = ctc_decode(logits_fused)
+```
+
 #### Allineamento delle Sequenze
-WavLM e XLS-R hanno lo stesso stride (20ms), quindi producono sequenze di lunghezza identica per lo stesso input audio.
+WavLM e HuBERT hanno lo stesso stride (20ms), quindi producono sequenze di lunghezza identica per lo stesso input audio.
 Se per qualche motivo (padding diverso) le lunghezze differiscono di 1-2 frame, troncataiamo alla lunghezza minima:
 
 ```python
@@ -268,6 +289,81 @@ fused = weight * lA + (1 - weight) * lB
 ```
 
 Questa operazione è sicura perché le differenze sono solo nei bordi di silenzio.
+
+---
+
+## 6b. Early Fusion via Feature Concatenation ⭐ NEW
+
+### 🎯 Motivazione
+
+A differenza della Late Fusion che combina le predizioni finali, la Early Fusion permette al classificatore di avere accesso **simultaneo** alle rappresentazioni di entrambi i modelli durante il training.
+
+**Vantaggio**: Il modello può imparare a pesare dinamicamente le feature HuBERT e WavLM in base al contesto acustico specifico.
+
+### 🏗️ Architettura Multi-Backbone
+
+```mermaid
+flowchart LR
+    A[Audio 16kHz] --> B[HuBERT Large<br/>frozen]
+    A --> C[WavLM Weighted<br/>frozen]
+    B --> D[Hidden 1024D]
+    C --> E[Hidden 1024D]
+    D --> F[Concat]
+    E --> F
+    F --> G[2048D Features]
+    G --> H[Dropout 0.1]
+    H --> I[Linear CTC Head]
+    I --> J[Phonemes IPA]
+```
+
+### 🛠️ Implementazione
+
+```python
+class EarlyFusionModel(nn.Module):
+    def __init__(self, vocab_size=43):
+        super().__init__()
+        # Backbone 1: HuBERT (frozen)
+        self.hubert = HubertModel.from_pretrained("facebook/hubert-large-ls960-ft")
+        for p in self.hubert.parameters():
+            p.requires_grad = False
+        
+        # Backbone 2: WavLM (frozen, weighted layer sum)
+        self.wavlm = WavLMModel.from_pretrained("microsoft/wavlm-large")
+        for p in self.wavlm.parameters():
+            p.requires_grad = False
+        self.layer_weights = nn.Parameter(torch.zeros(25))  # apprendibile!
+        
+        # CTC Head (unico trainable)
+        self.dropout = nn.Dropout(0.1)
+        self.ctc_head = nn.Linear(2048, vocab_size)  # 1024+1024
+    
+    def forward(self, audio):
+        # Estrai feature da entrambi
+        h_hubert = self.hubert(audio).last_hidden_state  # [B, T, 1024]
+        h_wavlm = self._weighted_wavlm(audio)            # [B, T, 1024]
+        
+        # Concatenazione Early Fusion
+        combined = torch.cat([h_hubert, h_wavlm], dim=-1)  # [B, T, 2048]
+        
+        # CTC
+        logits = self.ctc_head(self.dropout(combined))
+        return logits
+```
+
+### ⚠️ Considerazioni Memoria
+
+| Configurazione | VRAM Stimata |
+|----------------|--------------|
+| fp32, no checkpointing | ~32GB ❌ |
+| fp16, no checkpointing | ~24GB ⚠️ |
+| fp16 + gradient checkpointing | ~18-20GB ✅ |
+| fp16 + checkpointing + batch=1 | ~14GB ✅ |
+
+**Raccomandazioni**:
+- Usare sempre `fp16=True`
+- Abilitare `gradient_checkpointing_enable()` su entrambi i backbone
+- Batch size 2 con gradient accumulation 8
+- Training su GPU con ≥20GB VRAM (A100, RTX 3090+)
 
 ---
 

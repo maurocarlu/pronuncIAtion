@@ -61,6 +61,41 @@ Per dettagli sulle metriche, vedi **[docs/BENCHMARK_GUIDE.md](docs/BENCHMARK_GUI
 | Qwen2-Audio | 1e-3 | 2 | 10 | **Linear Probe** | `train_qwen_audio.py` |
 | Wav2Vec2-BERT | 3e-4 | 4 | 10 | Fine-tuning | `train_w2v2_bert.py` |
 | SpeechTokenizer | 1e-3 | 4 | 10 | 2-Stage | `train_speechtokenizer.py` |
+| **Early Fusion** | 1e-4 | 2 | 5 | **Frozen+CTC** | `train_early_fusion.py` |
+
+---
+
+## 🧪 Fusion Experiments (Gennaio 2025)
+
+### Late Fusion "Dream Team" (HuBERT + WavLM)
+
+Combinazione dei due top-performer a livello logit:
+
+| α (HuBERT) | PER (HQ) | AUC-ROC | Note |
+|------------|----------|---------|------|
+| 0.3 | TBD | TBD | Peso maggiore WavLM |
+| 0.5 | TBD | TBD | Media semplice |
+| 0.7 | TBD | TBD | Peso maggiore HuBERT |
+
+**Script**: `scripts/evaluation/evaluate_hubert_fusion.py`
+
+### Early Fusion Multi-Backbone
+
+| Parametro | Valore |
+|-----------|--------|
+| Backbone | HuBERT + WavLM (frozen) |
+| Features | 1024 + 1024 = 2048D |
+| CTC Head | Linear(2048, 43) |
+| fp16 | ✓ |
+| Gradient Checkpointing | ✓ |
+| VRAM stimata | ~20GB |
+
+**Sfide memoria**: Due modelli Large contemporaneamente richiedono:
+- fp16 obbligatorio
+- Batch size ridotto (2)
+- Gradient accumulation alto (8)
+
+**Script**: `scripts/training/train_early_fusion.py`
 
 ---
 
@@ -75,12 +110,17 @@ Per dettagli sulle metriche, vedi **[docs/BENCHMARK_GUIDE.md](docs/BENCHMARK_GUI
 7. **Whisper Encoder** (`train_whisper_encoder.py`)
 8. **SpeechTokenizer** (`train_speechtokenizer.py`)
 9. **Qwen2-Audio** (`train_qwen_audio.py`) - Linear Probe
-10. **Wav2Vec2-BERT** (`train_w2v2_bert.py`) - NEW
+10. **Wav2Vec2-BERT** (`train_w2v2_bert.py`)
+11. **Late Fusion HuBERT+WavLM** (`evaluate_hubert_fusion.py`) - 🆕 NEW
+12. **Early Fusion Multi-Backbone** (`train_early_fusion.py`) - 🆕 NEW
 
 ---
 
 ## 🔜 Next Steps
 
-1. Completare training **Wav2Vec2-BERT** e confrontare con Wav2Vec2 standard.
-2. Testare **Qwen2-Audio** Linear Probe per valutare feature multimodali.
-3. Investigare perché **HuBERT** performa così meglio di WavLM.
+1. ✅ ~~Implementare Late Fusion HuBERT + WavLM~~
+2. ✅ ~~Implementare Early Fusion Multi-Backbone~~
+3. Eseguire sweep pesi Late Fusion (α ∈ {0.3, 0.5, 0.7})
+4. Training Early Fusion su GPU con ≥20GB VRAM
+5. Generare report qualitativo con `analyze_model_gap.py`
+6. Aggiornare tabella risultati con nuovo record AUC

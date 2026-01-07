@@ -30,17 +30,16 @@ La documentazione completa del progetto è disponibile nella cartella [`docs/`](
 
 ## 🤖 Modelli Implementati
 
-| Modello | Params | Mode | VRAM | Script |
-|---------|--------|------|------|--------|
-| WavLM Large | 317M | Fine-tuning | ~12GB | `train_wavlm.py` |
-| HuBERT Large | 317M | Fine-tuning | ~12GB | `train_hubert.py` |
-| XLS-R 300M | 300M | Fine-tuning | ~10GB | `train_xlsr.py` |
-| Whisper (Encoder) | 244M | Last 4 layers | ~8GB | `train_whisper_encoder.py` |
-| SpeechTokenizer | 256K | 2-Stage | ~4GB | `train_speechtokenizer.py` |
-| **Qwen2-Audio** | **260K** | **Linear Probe** | **~5GB** | `train_qwen_audio.py` |
-| **Wav2Vec2-BERT** | **600M** | **Fine-tuning** | **~12GB** | `train_w2v2_bert.py` |
-| **MMS 1B** | **1B** | **Fine-tuning** | **~16GB** | `train_mms.py` |
-| Baseline MLP | 2M | Linear Probe | ~4GB | `train_baseline_mlp.py` |
+| Modello | Params | Mode | VRAM | Status | Script |
+|---------|--------|------|------|--------|--------|
+| **HuBERT Large** | 317M | Fine-tuning | ~12GB | 🏆 **Best PER: 8.84%** | `train_hubert.py` |
+| **WavLM Weighted** | 317M | Fine-tuning | ~12GB | 🏆 **Best AUC: 0.8523** | `train_weighted.py` |
+| **Late Fusion** | 634M | Inference | ~16GB | 🆕 NEW | `evaluate_hubert_fusion.py` |
+| **Early Fusion** | 634M | Frozen+CTC | ~20GB | 🆕 NEW | `train_early_fusion.py` |
+| WavLM Large | 317M | Fine-tuning | ~12GB | ✅ | `train_wavlm.py` |
+| XLS-R 300M | 300M | Fine-tuning | ~10GB | ✅ | `train_xlsr.py` |
+| Whisper (Encoder) | 244M | Last 4 layers | ~8GB | ❌ | `train_whisper_encoder.py` |
+| Baseline MLP | 2M | Linear Probe | ~4GB | ✅ | `train_baseline_mlp.py` |
 
 > Dettagli completi: [docs/MODEL_ZOO.md](docs/MODEL_ZOO.md)
 
