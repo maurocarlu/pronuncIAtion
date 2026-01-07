@@ -191,24 +191,11 @@ class EarlyFusionModel(nn.Module):
         print(f"   Weighted WavLM: {use_weighted_wavlm}")
         print(f"   Freeze backbones: {freeze_backbones}")
         
-        # 4-bit quantization per ridurre VRAM
-        use_4bit = freeze_backbones  # Solo se frozen
-        if use_4bit:
-            try:
-                from transformers import BitsAndBytesConfig
-                bnb_config = BitsAndBytesConfig(
-                    load_in_4bit=True,
-                    bnb_4bit_quant_type="nf4",
-                    bnb_4bit_compute_dtype=torch.float16,
-                    bnb_4bit_use_double_quant=True,
-                )
-                print(f"   4-bit quantization: ENABLED")
-            except ImportError:
-                print(f"   ⚠️ bitsandbytes not installed, using fp16")
-                bnb_config = None
-                use_4bit = False
-        else:
-            bnb_config = None
+        # Disabilitato 4-bit quantization (causa problemi con inplace ops)
+        # Con WavLM Base invece di Large, fp16 è sufficiente
+        use_4bit = False
+        bnb_config = None
+        print(f"   Using: fp16 (4-bit disabled for stability)")
         
         # Carica HuBERT (supporta sia HubertModel che HubertForCTC checkpoints)
         print(f"   Loading HuBERT from: {hubert_name}")
@@ -340,23 +327,26 @@ class EarlyFusionModel(nn.Module):
             # attention_mask should stay as the original type for most models
             pass  # Keep attention_mask as-is
         
-        # HuBERT forward
-        outputs_h = self.hubert(
-            input_values,
-            attention_mask=attention_mask,
-        )
-        hidden_h = outputs_h.last_hidden_state  # [batch, time, 1024]
-        
-        # WavLM forward
-        outputs_w = self.wavlm(
-            input_values,
-            attention_mask=attention_mask,
-        )
-        
-        if self.use_weighted:
-            hidden_w = self._get_wavlm_weighted_output(outputs_w.hidden_states)
-        else:
-            hidden_w = outputs_w.last_hidden_state
+        # Backbone forwards wrapped in no_grad since they are frozen
+        # This also fixes 4-bit quantization inplace operation issues
+        with torch.no_grad():
+            # HuBERT forward
+            outputs_h = self.hubert(
+                input_values,
+                attention_mask=attention_mask,
+            )
+            hidden_h = outputs_h.last_hidden_state.clone()  # Clone to detach from graph
+            
+            # WavLM forward
+            outputs_w = self.wavlm(
+                input_values,
+                attention_mask=attention_mask,
+            )
+            
+            if self.use_weighted:
+                hidden_w = self._get_wavlm_weighted_output(outputs_w.hidden_states).clone()
+            else:
+                hidden_w = outputs_w.last_hidden_state.clone()
         
         # Allineamento temporale (dovrebbero essere identici, ma per sicurezza)
         min_len = min(hidden_h.size(1), hidden_w.size(1))
