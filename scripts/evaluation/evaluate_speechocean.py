@@ -399,59 +399,45 @@ def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bo
                             print(f"   [DEBUG] Is callable: {callable(audio_info)}")
                             print(f"   [DEBUG] Has __getitem__: {hasattr(audio_info, '__getitem__')}")
                     
-                    # Handle TorchCodec AudioDecoder - try multiple access methods
+                    # Handle TorchCodec AudioDecoder - use get_all_samples() method
                     audio_decoded = False
                     
-                    # Method 1: Try calling it (some versions are callable)
-                    if callable(audio_info):
+                    # Method 1: TorchCodec AudioDecoder.get_all_samples() - the correct API
+                    if hasattr(audio_info, 'get_all_samples'):
                         try:
-                            decoded = audio_info()
+                            samples = audio_info.get_all_samples()
                             if i == 0:
-                                print(f"   [DEBUG] Called audio_info(), got: {type(decoded)}")
-                            if hasattr(decoded, 'data'):
-                                data = decoded.data
+                                print(f"   [DEBUG] get_all_samples() returned type: {type(samples)}")
+                                if hasattr(samples, 'data'):
+                                    print(f"   [DEBUG] samples.data shape: {samples.data.shape}")
+                            
+                            if hasattr(samples, 'data'):
+                                data = samples.data
                                 if hasattr(data, 'numpy'):
                                     audio_arr = data.numpy()
                                 else:
                                     audio_arr = np.asarray(data)
-                                audio_decoded = True
-                        except Exception as e:
-                            if i == 0:
-                                print(f"   [DEBUG] audio_info() failed: {e}")
-                    
-                    # Method 2: Try subscript access (like audio_info[:])
-                    if not audio_decoded and hasattr(audio_info, '__getitem__'):
-                        try:
-                            decoded = audio_info[:]
-                            if i == 0:
-                                print(f"   [DEBUG] audio_info[:] type: {type(decoded)}")
-                            if isinstance(decoded, dict) and 'array' in decoded:
-                                audio_arr = np.asarray(decoded['array'])
-                                audio_decoded = True
-                            elif hasattr(decoded, 'data'):
-                                audio_arr = np.asarray(decoded.data)
-                                audio_decoded = True
-                            elif hasattr(decoded, 'numpy'):
-                                audio_arr = decoded.numpy()
-                                audio_decoded = True
                             else:
-                                audio_arr = np.asarray(decoded)
-                                audio_decoded = True
-                        except Exception as e:
-                            if i == 0:
-                                print(f"   [DEBUG] audio_info[:] failed: {e}")
-                    
-                    # Method 3: Try .decode() method
-                    if not audio_decoded and hasattr(audio_info, 'decode'):
-                        try:
-                            decoded = audio_info.decode()
-                            if i == 0:
-                                print(f"   [DEBUG] audio_info.decode() type: {type(decoded)}")
-                            audio_arr = np.asarray(decoded)
+                                audio_arr = np.asarray(samples)
                             audio_decoded = True
                         except Exception as e:
                             if i == 0:
-                                print(f"   [DEBUG] audio_info.decode() failed: {e}")
+                                import traceback
+                                print(f"   [DEBUG] get_all_samples() failed: {e}")
+                                traceback.print_exc()
+                    
+                    # Method 2: Try calling it (some older versions are callable)
+                    if not audio_decoded and callable(audio_info):
+                        try:
+                            decoded = audio_info()
+                            if hasattr(decoded, 'data'):
+                                audio_arr = np.asarray(decoded.data)
+                            else:
+                                audio_arr = np.asarray(decoded)
+                            audio_decoded = True
+                        except Exception as e:
+                            if i == 0:
+                                print(f"   [DEBUG] audio_info() failed: {e}")
                     
                     # Method 4: Access .array or .data directly
                     if not audio_decoded:
