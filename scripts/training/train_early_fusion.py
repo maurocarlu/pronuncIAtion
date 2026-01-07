@@ -210,21 +210,55 @@ class EarlyFusionModel(nn.Module):
         else:
             bnb_config = None
         
-        # Carica HuBERT
-        self.hubert = HubertModel.from_pretrained(
-            hubert_name,
-            output_hidden_states=False,
-            quantization_config=bnb_config if use_4bit else None,
-            torch_dtype=torch.float16 if not use_4bit else None,
-        )
+        # Carica HuBERT (supporta sia HubertModel che HubertForCTC checkpoints)
+        print(f"   Loading HuBERT from: {hubert_name}")
+        try:
+            # Prima prova a caricare come HubertForCTC (modello fine-tuned)
+            from transformers import HubertForCTC
+            hubert_full = HubertForCTC.from_pretrained(
+                hubert_name,
+                quantization_config=bnb_config if use_4bit else None,
+                torch_dtype=torch.float16 if not use_4bit else None,
+            )
+            # Estrai solo l'encoder (hubert interno)
+            self.hubert = hubert_full.hubert
+            print(f"   ✓ HuBERT: Loaded from ForCTC checkpoint (encoder extracted)")
+        except Exception:
+            # Fallback: carica come HubertModel base
+            self.hubert = HubertModel.from_pretrained(
+                hubert_name,
+                output_hidden_states=False,
+                quantization_config=bnb_config if use_4bit else None,
+                torch_dtype=torch.float16 if not use_4bit else None,
+            )
+            print(f"   ✓ HuBERT: Loaded as base Model")
         
-        # Carica WavLM
-        self.wavlm = WavLMModel.from_pretrained(
-            wavlm_name,
-            output_hidden_states=use_weighted_wavlm,
-            quantization_config=bnb_config if use_4bit else None,
-            torch_dtype=torch.float16 if not use_4bit else None,
-        )
+        # Carica WavLM (supporta sia WavLMModel che WavLMForCTC checkpoints)
+        print(f"   Loading WavLM from: {wavlm_name}")
+        try:
+            # Prima prova a caricare come WavLMForCTC (modello fine-tuned)
+            from transformers import WavLMForCTC
+            wavlm_full = WavLMForCTC.from_pretrained(
+                wavlm_name,
+                quantization_config=bnb_config if use_4bit else None,
+                torch_dtype=torch.float16 if not use_4bit else None,
+            )
+            # Estrai solo l'encoder (wavlm interno)
+            self.wavlm = wavlm_full.wavlm
+            print(f"   ✓ WavLM: Loaded from ForCTC checkpoint (encoder extracted)")
+        except Exception:
+            # Fallback: carica come WavLMModel base
+            self.wavlm = WavLMModel.from_pretrained(
+                wavlm_name,
+                output_hidden_states=use_weighted_wavlm,
+                quantization_config=bnb_config if use_4bit else None,
+                torch_dtype=torch.float16 if not use_4bit else None,
+            )
+            print(f"   ✓ WavLM: Loaded as base Model")
+        
+        # Ensure output_hidden_states is set for weighted sum
+        if use_weighted_wavlm:
+            self.wavlm.config.output_hidden_states = True
         
         # Weighted Layer Sum per WavLM
         self.use_weighted = use_weighted_wavlm
@@ -808,6 +842,18 @@ def main():
         action="store_true",
         help="Riprendi dall'ultimo checkpoint"
     )
+    parser.add_argument(
+        "--wavlm-path",
+        type=str,
+        default=None,
+        help="Path to custom WavLM checkpoint (default: microsoft/wavlm-base)"
+    )
+    parser.add_argument(
+        "--hubert-path",
+        type=str,
+        default=None,
+        help="Path to custom HuBERT checkpoint (default: facebook/hubert-large-ls960-ft)"
+    )
     
     args = parser.parse_args()
     
@@ -817,8 +863,8 @@ def main():
     else:
         config = {
             "model": {
-                "hubert_name": "facebook/hubert-large-ls960-ft",
-                "wavlm_name": "microsoft/wavlm-large",
+                "hubert_name": args.hubert_path or "facebook/hubert-large-ls960-ft",
+                "wavlm_name": args.wavlm_path or "microsoft/wavlm-base",  # Changed to base!
                 "freeze_backbones": True,
                 "dropout_rate": 0.1,
                 "use_weighted_wavlm": True,
