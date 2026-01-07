@@ -522,69 +522,77 @@ class EarlyFusionTrainerWrapper:
             print("[EarlyFusion] ✓ Gradient checkpointing enabled")
     
     def load_and_prepare_dataset(self):
-        """Carica e preprocessa dataset."""
+        """Carica e preprocessa dataset usando for-loop (evita pickle issues)."""
         csv_path = self.config["data"]["csv_path"]
         audio_base = self.config["data"]["audio_base_path"]
         
         print(f"[EarlyFusion] Caricamento dataset: {csv_path}")
         
-        dataset = load_dataset("csv", data_files=csv_path, split="train")
-        print(f"[EarlyFusion] Samples totali: {len(dataset)}")
+        # Carica CSV direttamente con pandas per evitare problemi di serializzazione
+        import pandas as pd
+        df = pd.read_csv(csv_path)
+        print(f"[EarlyFusion] Samples totali: {len(df)}")
         
         # Split
         val_size = self.config["data"].get("val_size", 0.1)
-        splits = dataset.train_test_split(test_size=val_size)
+        val_count = int(len(df) * val_size)
         
-        print(f"[EarlyFusion] Train: {len(splits['train'])}, Val: {len(splits['test'])}")
+        # Shuffle and split
+        df = df.sample(frac=1, random_state=42).reset_index(drop=True)
+        train_df = df.iloc[val_count:]
+        val_df = df.iloc[:val_count]
+        
+        print(f"[EarlyFusion] Train: {len(train_df)}, Val: {len(val_df)}")
         
         base_path = Path(audio_base)
         
-        # Store references to avoid pickle issues with self
-        processor = self.processor
-        tokenizer = self.tokenizer
-        
-        def preprocess(batch):
-            audio_path = str(batch.get("audio_path", "")).replace("\\", "/")
-            full_path = base_path / audio_path
+        def preprocess_dataframe(dataframe, desc="Processing"):
+            """Preprocessa dataframe in lista di dizionari."""
+            processed = []
+            import librosa
+            from tqdm import tqdm
             
-            try:
-                import librosa
-                audio, sr = librosa.load(full_path, sr=16000)
-            except Exception:
-                audio = np.zeros(16000, dtype=np.float32)
+            for idx, row in tqdm(dataframe.iterrows(), total=len(dataframe), desc=desc):
+                audio_path = str(row.get("audio_path", "")).replace("\\", "/")
+                full_path = base_path / audio_path
+                
+                try:
+                    audio, sr = librosa.load(full_path, sr=16000)
+                except Exception:
+                    audio = np.zeros(16000, dtype=np.float32)
+                
+                inputs = self.processor(
+                    audio,
+                    sampling_rate=16000,
+                    return_tensors=None,
+                )
+                
+                ipa = row.get("ipa_clean", "")
+                if pd.isna(ipa) or not ipa:
+                    ipa = ""
+                labels = self.tokenizer(str(ipa)).input_ids
+                
+                processed.append({
+                    "input_values": inputs.input_values[0],
+                    "labels": labels,
+                })
             
-            inputs = processor(
-                audio,
-                sampling_rate=16000,
-                return_tensors=None,
-            )
-            batch["input_values"] = inputs.input_values[0]
-            
-            ipa = batch.get("ipa_clean", "")
-            if not ipa or (isinstance(ipa, float) and np.isnan(ipa)):
-                ipa = ""
-            batch["labels"] = tokenizer(str(ipa)).input_ids
-            
-            return batch
+            return processed
         
         print("\n🔄 Preprocessing TRAIN set...")
-        self.train_dataset = splits["train"].map(
-            preprocess,
-            remove_columns=splits["train"].column_names,
-            desc="Train preprocessing",
-            num_proc=1,
-            load_from_cache_file=False,  # Avoid pickle serialization issues
-        )
+        train_data = preprocess_dataframe(train_df, "Train preprocessing")
         
         print("\n🔄 Preprocessing VAL set...")
-        self.val_dataset = splits["test"].map(
-            preprocess,
-            remove_columns=splits["test"].column_names,
-            desc="Val preprocessing",
-            num_proc=1,
-            load_from_cache_file=False,  # Avoid pickle serialization issues
-        )
-        print("✓ Preprocessing completato!\n")
+        val_data = preprocess_dataframe(val_df, "Val preprocessing")
+        
+        # Converti in Dataset HuggingFace
+        from datasets import Dataset
+        self.train_dataset = Dataset.from_list(train_data)
+        self.val_dataset = Dataset.from_list(val_data)
+        
+        print(f"✓ Preprocessing completato!")
+        print(f"  Train samples: {len(self.train_dataset)}")
+        print(f"  Val samples: {len(self.val_dataset)}\n")
     
     def train(self):
         """Esegue training."""
