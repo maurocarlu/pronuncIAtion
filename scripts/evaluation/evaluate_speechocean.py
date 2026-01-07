@@ -392,75 +392,133 @@ def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bo
                         print(f"   [DEBUG] Audio info type: {type(audio_info)}")
                         if isinstance(audio_info, dict):
                             print(f"   [DEBUG] Audio keys: {audio_info.keys()}")
+                        else:
+                            # Show what attributes/methods AudioDecoder has
+                            attrs = [a for a in dir(audio_info) if not a.startswith('_')]
+                            print(f"   [DEBUG] AudioDecoder attrs: {attrs[:20]}")
+                            print(f"   [DEBUG] Is callable: {callable(audio_info)}")
+                            print(f"   [DEBUG] Has __getitem__: {hasattr(audio_info, '__getitem__')}")
                     
-                    # Handle TorchCodec AudioDecoder (callable objects)
-                    if hasattr(audio_info, '__call__'):
+                    # Handle TorchCodec AudioDecoder - try multiple access methods
+                    audio_decoded = False
+                    
+                    # Method 1: Try calling it (some versions are callable)
+                    if callable(audio_info):
                         try:
                             decoded = audio_info()
                             if i == 0:
-                                print(f"   [DEBUG] Decoded type: {type(decoded)}")
-                                if hasattr(decoded, 'data'):
-                                    print(f"   [DEBUG] decoded.data type: {type(decoded.data)}, shape: {decoded.data.shape if hasattr(decoded.data, 'shape') else 'N/A'}")
-                            
+                                print(f"   [DEBUG] Called audio_info(), got: {type(decoded)}")
                             if hasattr(decoded, 'data'):
-                                # TorchCodec returns a FrameBatch with data tensor
                                 data = decoded.data
                                 if hasattr(data, 'numpy'):
                                     audio_arr = data.numpy()
                                 else:
                                     audio_arr = np.asarray(data)
-                                # Squeeze to 1D if needed (stereo to mono, remove batch dims)
-                                if audio_arr.ndim > 1:
-                                    audio_arr = audio_arr.squeeze()
-                                if audio_arr.ndim > 1:
-                                    audio_arr = audio_arr.mean(axis=0)  # stereo to mono
-                                audio_arr = audio_arr.astype(np.float32)
-                                # Normalize if int16
-                                if audio_arr.max() > 1.0:
-                                    audio_arr = audio_arr / 32768.0
-                            elif hasattr(decoded, 'array'):
-                                audio_arr = np.asarray(decoded.array).astype(np.float32)
+                                audio_decoded = True
+                        except Exception as e:
+                            if i == 0:
+                                print(f"   [DEBUG] audio_info() failed: {e}")
+                    
+                    # Method 2: Try subscript access (like audio_info[:])
+                    if not audio_decoded and hasattr(audio_info, '__getitem__'):
+                        try:
+                            decoded = audio_info[:]
+                            if i == 0:
+                                print(f"   [DEBUG] audio_info[:] type: {type(decoded)}")
+                            if isinstance(decoded, dict) and 'array' in decoded:
+                                audio_arr = np.asarray(decoded['array'])
+                                audio_decoded = True
+                            elif hasattr(decoded, 'data'):
+                                audio_arr = np.asarray(decoded.data)
+                                audio_decoded = True
+                            elif hasattr(decoded, 'numpy'):
+                                audio_arr = decoded.numpy()
+                                audio_decoded = True
                             else:
-                                audio_arr = np.asarray(decoded).astype(np.float32)
-                            
-                            if i == 0 and audio_arr is not None:
-                                print(f"   [DEBUG] Final audio_arr shape: {audio_arr.shape}, dtype: {audio_arr.dtype}")
+                                audio_arr = np.asarray(decoded)
+                                audio_decoded = True
                         except Exception as e:
                             if i == 0:
-                                import traceback
-                                print(f"   [DEBUG] AudioDecoder call failed: {e}")
-                                traceback.print_exc()
-                    elif isinstance(audio_info, dict) and "path" in audio_info:
+                                print(f"   [DEBUG] audio_info[:] failed: {e}")
+                    
+                    # Method 3: Try .decode() method
+                    if not audio_decoded and hasattr(audio_info, 'decode'):
                         try:
-                            audio_arr, _ = librosa.load(audio_info["path"], sr=16000)
+                            decoded = audio_info.decode()
+                            if i == 0:
+                                print(f"   [DEBUG] audio_info.decode() type: {type(decoded)}")
+                            audio_arr = np.asarray(decoded)
+                            audio_decoded = True
                         except Exception as e:
                             if i == 0:
-                                print(f"   [DEBUG] librosa.load failed: {e}")
-                            # Try bytes if path fails
-                            if "bytes" in audio_info and audio_info["bytes"]:
-                                import io
-                                import soundfile as sf
-                                try:
-                                    audio_arr, sr = sf.read(io.BytesIO(audio_info["bytes"]))
-                                    if sr != 16000:
-                                        audio_arr = librosa.resample(audio_arr, orig_sr=sr, target_sr=16000)
-                                except Exception as e2:
-                                    if i == 0:
-                                        print(f"   [DEBUG] soundfile from bytes failed: {e2}")
-                    elif isinstance(audio_info, dict) and "bytes" in audio_info and audio_info["bytes"]:
-                        import io
-                        import soundfile as sf
-                        try:
-                            audio_arr, sr = sf.read(io.BytesIO(audio_info["bytes"]))
+                                print(f"   [DEBUG] audio_info.decode() failed: {e}")
+                    
+                    # Method 4: Access .array or .data directly
+                    if not audio_decoded:
+                        if hasattr(audio_info, 'array'):
+                            audio_arr = np.asarray(audio_info.array)
+                            audio_decoded = True
+                            if i == 0:
+                                print(f"   [DEBUG] Got audio from .array")
+                        elif hasattr(audio_info, 'data'):
+                            audio_arr = np.asarray(audio_info.data)
+                            audio_decoded = True
+                            if i == 0:
+                                print(f"   [DEBUG] Got audio from .data")
+                    
+                    # Post-process if we got audio
+                    if audio_decoded and audio_arr is not None:
+                        # Squeeze to 1D if needed
+                        if audio_arr.ndim > 1:
+                            audio_arr = audio_arr.squeeze()
+                        if audio_arr.ndim > 1:
+                            audio_arr = audio_arr.mean(axis=0)
+                        audio_arr = audio_arr.astype(np.float32)
+                        # Normalize if int16
+                        if len(audio_arr) > 0 and np.abs(audio_arr).max() > 1.0:
+                            audio_arr = audio_arr / 32768.0
+                        if i == 0:
+                            print(f"   [DEBUG] Final audio shape: {audio_arr.shape}, dtype: {audio_arr.dtype}")
+                    elif i == 0:
+                        print(f"   [DEBUG] All audio decode methods failed for first example")
+                    
+                    # Fallback for dict-based audio (older datasets format)
+                    if not audio_decoded and isinstance(audio_info, dict):
+                        if "path" in audio_info:
+                            try:
+                                audio_arr, _ = librosa.load(audio_info["path"], sr=16000)
+                                audio_decoded = True
+                            except Exception as e:
+                                if i == 0:
+                                    print(f"   [DEBUG] librosa.load failed: {e}")
+                                # Try bytes if path fails
+                                if "bytes" in audio_info and audio_info["bytes"]:
+                                    import io
+                                    import soundfile as sf
+                                    try:
+                                        audio_arr, sr = sf.read(io.BytesIO(audio_info["bytes"]))
+                                        if sr != 16000:
+                                            audio_arr = librosa.resample(audio_arr, orig_sr=sr, target_sr=16000)
+                                        audio_decoded = True
+                                    except Exception as e2:
+                                        if i == 0:
+                                            print(f"   [DEBUG] soundfile from bytes failed: {e2}")
+                        elif "bytes" in audio_info and audio_info["bytes"]:
+                            import io
+                            import soundfile as sf
+                            try:
+                                audio_arr, sr = sf.read(io.BytesIO(audio_info["bytes"]))
+                                if sr != 16000:
+                                    audio_arr = librosa.resample(audio_arr, orig_sr=sr, target_sr=16000)
+                                audio_decoded = True
+                            except Exception:
+                                pass
+                        elif "array" in audio_info:
+                            audio_arr = np.asarray(audio_info["array"]).astype(np.float32)
+                            sr = audio_info.get("sampling_rate", 16000)
                             if sr != 16000:
                                 audio_arr = librosa.resample(audio_arr, orig_sr=sr, target_sr=16000)
-                        except Exception:
-                            pass
-                    elif isinstance(audio_info, dict) and "array" in audio_info:
-                        audio_arr = audio_info["array"]
-                        sr = audio_info.get("sampling_rate", 16000)
-                        if sr != 16000:
-                            audio_arr = librosa.resample(audio_arr, orig_sr=sr, target_sr=16000)
+                            audio_decoded = True
                     
                     if audio_arr is not None:
                         collected_examples.append({
