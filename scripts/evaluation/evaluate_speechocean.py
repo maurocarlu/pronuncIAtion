@@ -606,7 +606,9 @@ def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bo
                 with torch.no_grad():
                     audio_outputs = self.audio_encoder(input_features)
                     hidden_states = audio_outputs.last_hidden_state
-                logits = self.ctc_head(hidden_states.to(self._device))
+                # Convert to float32 for CTC head (encoder outputs fp16 due to quantization)
+                hidden_states = hidden_states.float().to(self._device)
+                logits = self.ctc_head(hidden_states)
                 return {"logits": logits}
         
         try:
