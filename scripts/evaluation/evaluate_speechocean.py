@@ -101,6 +101,7 @@ def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bo
     is_whisper_encoder = False
     is_qwen_audio = False
     is_w2v_bert = False
+    is_early_fusion = False  # NEW
     config = {}
     
     if config_path.exists():
@@ -111,6 +112,7 @@ def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bo
         is_speechtokenizer = config.get("model_type") == "speechtokenizer_discrete_ctc"
         is_whisper_encoder = config.get("model_type") == "whisper_encoder_ctc"
         is_qwen_audio = config.get("model_type") == "qwen2_audio_ctc"
+        is_early_fusion = config.get("model_type") == "early_fusion"  # NEW
         is_w2v_bert = config.get("model_type") == "wav2vec2-bert" or \
                       "wav2vec2bert" in config.get("architectures", [""])[0].lower() or \
                       "w2v-bert" in str(config.get("_name_or_path", "")).lower()
@@ -126,7 +128,7 @@ def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bo
     print("\n📦 Caricamento modello...")
     
     # Per modelli custom, usa solo tokenizer (non Wav2Vec2Processor completo)
-    if is_speechtokenizer or is_whisper_encoder or is_qwen_audio:
+    if is_speechtokenizer or is_whisper_encoder or is_qwen_audio or is_early_fusion:
         from transformers import Wav2Vec2CTCTokenizer
         processor = Wav2Vec2CTCTokenizer.from_pretrained(model_path)
     elif is_w2v_bert:
