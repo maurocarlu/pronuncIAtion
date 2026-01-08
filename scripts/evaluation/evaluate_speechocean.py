@@ -219,6 +219,94 @@ def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bo
         from transformers import HubertForCTC
         model = HubertForCTC.from_pretrained(model_path)
         
+    elif is_early_fusion:
+        print("   Tipo: EarlyFusionModel (HuBERT + WavLM)")
+        vocab_size = config.get("vocab_size", 45)
+        hubert_name = config.get("hubert_name", "facebook/hubert-large-ls960-ft")
+        wavlm_name = config.get("wavlm_name", "microsoft/wavlm-base")
+        use_weighted = config.get("use_weighted_wavlm", True)
+        
+        from typing import Tuple, Optional, Dict
+        from transformers import HubertModel, HubertForCTC
+        from transformers.models.wavlm import WavLMModel, WavLMForCTC
+        
+        class EarlyFusionModel(nn.Module):
+            def __init__(self, vocab_size, hubert_name, wavlm_name, use_weighted=True):
+                super().__init__()
+                # Load HuBERT encoder
+                try:
+                    hubert_full = HubertForCTC.from_pretrained(hubert_name)
+                    self.hubert = hubert_full.hubert
+                except:
+                    self.hubert = HubertModel.from_pretrained(hubert_name)
+                
+                # Load WavLM encoder
+                try:
+                    wavlm_full = WavLMForCTC.from_pretrained(wavlm_name)
+                    self.wavlm = wavlm_full.wavlm
+                except:
+                    self.wavlm = WavLMModel.from_pretrained(wavlm_name)
+                
+                # Weighted layer sum for WavLM
+                self.use_weighted = use_weighted
+                if use_weighted:
+                    num_layers = self.wavlm.config.num_hidden_layers + 1
+                    self.layer_weights = nn.Parameter(torch.zeros(num_layers))
+                    self.wavlm.config.output_hidden_states = True
+                
+                # CTC Head
+                hidden_h = self.hubert.config.hidden_size
+                hidden_w = self.wavlm.config.hidden_size
+                self.dropout = nn.Dropout(0.1)
+                self.ctc_head = nn.Linear(hidden_h + hidden_w, vocab_size)
+            
+            def _get_wavlm_weighted_output(self, hidden_states):
+                weights = F.softmax(self.layer_weights, dim=0)
+                stacked = torch.stack(hidden_states, dim=0)
+                weights_view = weights.view(-1, 1, 1, 1)
+                return (stacked * weights_view).sum(dim=0)
+            
+            def forward(self, input_values, attention_mask=None, **kwargs):
+                # Get target dtype
+                target_dtype = next(self.hubert.parameters()).dtype
+                if input_values.dtype != target_dtype:
+                    input_values = input_values.to(target_dtype)
+                
+                with torch.no_grad():
+                    h_h = self.hubert(input_values, attention_mask=attention_mask).last_hidden_state.clone()
+                    outputs_w = self.wavlm(input_values, attention_mask=attention_mask)
+                    if self.use_weighted and hasattr(outputs_w, 'hidden_states') and outputs_w.hidden_states:
+                        h_w = self._get_wavlm_weighted_output(outputs_w.hidden_states).clone()
+                    else:
+                        h_w = outputs_w.last_hidden_state.clone()
+                
+                # Align temporal dimension
+                min_len = min(h_h.size(1), h_w.size(1))
+                combined = torch.cat([h_h[:,:min_len], h_w[:,:min_len]], dim=-1)
+                logits = self.ctc_head(self.dropout(combined))
+                return {"logits": logits}
+        
+        model = EarlyFusionModel(vocab_size, hubert_name, wavlm_name, use_weighted)
+        
+        # Load trained weights
+        model_file = Path(model_path) / "pytorch_model.bin"
+        if not model_file.exists():
+            model_file = Path(model_path) / "model.safetensors"
+        
+        if model_file.suffix == ".bin":
+            state_dict = torch.load(model_file, map_location="cpu")
+        else:
+            from safetensors.torch import load_file
+            state_dict = load_file(str(model_file))
+        
+        # Load only the trained parts (ctc_head, layer_weights, dropout)
+        model_state = model.state_dict()
+        for key in state_dict:
+            if key in model_state:
+                model_state[key] = state_dict[key]
+        model.load_state_dict(model_state)
+        print(f"   ✓ EarlyFusionModel caricato: {vocab_size} classi, {hubert_name} + {wavlm_name}")
+        
     elif is_speechtokenizer:
         print("   Tipo: SpeechTokenizer (Discrete)")
         vocab_size = config.get("vocab_size", 100)
