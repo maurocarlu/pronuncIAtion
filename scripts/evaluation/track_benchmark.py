@@ -238,7 +238,7 @@ def main():
     parser.add_argument(
         "--architecture", type=str, default="Standard",
         choices=["Standard", "Weighted", "Ensemble", "Linear Probe", "HuBERT", "XLS-R",
-                 "Wav2Vec2", "Whisper", "SpeechTokenizer", "Qwen2-Audio"],
+                 "Wav2Vec2", "Whisper", "SpeechTokenizer", "Qwen2-Audio", "Fusion"],
         help="Tipo architettura"
     )
     parser.add_argument(

@@ -222,8 +222,34 @@ def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bo
     elif is_early_fusion:
         print("   Tipo: EarlyFusionModel (HuBERT + WavLM)")
         vocab_size = config.get("vocab_size", 45)
+        
+        # Get encoder paths from config
         hubert_name = config.get("hubert_name", "facebook/hubert-large-ls960-ft")
         wavlm_name = config.get("wavlm_name", "microsoft/wavlm-base")
+        
+        # Check if paths are local - try local backup paths before HuggingFace
+        model_base = Path(model_path).parent  # outputs/backup level
+        
+        # HuBERT fallback chain: config path -> local backup -> HuggingFace
+        if hubert_name.startswith("/") and not Path(hubert_name).exists():
+            local_hubert = model_base / "hubert_large" / "final_model_hubert"
+            if local_hubert.exists():
+                hubert_name = str(local_hubert)
+                print(f"   ✓ HuBERT: using local backup at {hubert_name}")
+            else:
+                hubert_name = "facebook/hubert-large-ls960-ft"
+                print(f"   ⚠️ HuBERT path not found, downloading from HuggingFace...")
+        
+        # WavLM fallback chain: config path -> local backup -> HuggingFace
+        if wavlm_name.startswith("/") and not Path(wavlm_name).exists():
+            local_wavlm = model_base / "wavLM" / "final_model_aug_comb"
+            if local_wavlm.exists():
+                wavlm_name = str(local_wavlm)
+                print(f"   ✓ WavLM: using local backup at {wavlm_name}")
+            else:
+                wavlm_name = "microsoft/wavlm-base"
+                print(f"   ⚠️ WavLM path not found, downloading from HuggingFace...")
+            
         use_weighted = config.get("use_weighted_wavlm", True)
         
         from typing import Tuple, Optional, Dict
@@ -312,10 +338,16 @@ def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bo
                 from safetensors.torch import load_file
                 state_dict = load_file(str(model_file))
             except Exception as e:
-                print(f"   ⚠️ safetensors load failed: {e}, trying torch.load...")
-                state_dict = torch.load(model_file, map_location="cpu")
+                print(f"   ⚠️ safetensors load failed: {e}")
+                print(f"   ⚠️ File may be corrupted. Trying pytorch_model.bin if exists...")
+                # Try pytorch_model.bin instead
+                alt_file = model_dir / "pytorch_model.bin"
+                if alt_file.exists():
+                    state_dict = torch.load(alt_file, map_location="cpu", weights_only=False)
+                else:
+                    raise ValueError(f"Cannot load model: safetensors corrupted and no pytorch_model.bin found")
         else:
-            state_dict = torch.load(model_file, map_location="cpu")
+            state_dict = torch.load(model_file, map_location="cpu", weights_only=False)
         
         # Load only the trained parts (ctc_head, layer_weights, dropout)
         model_state = model.state_dict()
@@ -897,6 +929,24 @@ def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bo
                 with torch.no_grad():
                     outputs = model(input_features)
                     logits = outputs["logits"]
+            elif is_early_fusion:
+                # Early Fusion uses raw audio directly, no processor needed for input
+                # Just convert audio arrays to tensors
+                max_len = max(len(a) for a in audio_arrays)
+                padded_audio = []
+                for a in audio_arrays:
+                    if len(a) < max_len:
+                        pad_width = max_len - len(a)
+                        a = np.pad(a, (0, pad_width), mode='constant')
+                    padded_audio.append(a)
+                input_values = torch.tensor(np.stack(padded_audio), dtype=torch.float32)
+                
+                with torch.no_grad():
+                    outputs = model(input_values)
+                    if isinstance(outputs, dict):
+                        logits = outputs["logits"]
+                    else:
+                        logits = outputs.logits
             else:
                 inputs = processor(
                     audio_arrays,
@@ -919,7 +969,7 @@ def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bo
             predicted_ids = torch.argmax(logits, dim=-1)
             
             # Apply CTC greedy decoding for models that need it
-            if is_whisper_encoder or is_qwen_audio:
+            if is_whisper_encoder or is_qwen_audio or is_early_fusion:
                 # Decode each sequence with CTC blank/repeat collapsing
                 predicted_texts = []
                 for seq in predicted_ids:
