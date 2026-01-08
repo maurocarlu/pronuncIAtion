@@ -288,24 +288,45 @@ def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bo
         
         model = EarlyFusionModel(vocab_size, hubert_name, wavlm_name, use_weighted)
         
-        # Load trained weights
-        model_file = Path(model_path) / "pytorch_model.bin"
-        if not model_file.exists():
-            model_file = Path(model_path) / "model.safetensors"
+        # Load trained weights - try multiple file formats
+        model_dir = Path(model_path)
+        possible_files = [
+            model_dir / "pytorch_model.bin",
+            model_dir / "model.safetensors", 
+            model_dir / "model.bin",
+        ]
         
-        if model_file.suffix == ".bin":
-            state_dict = torch.load(model_file, map_location="cpu")
+        model_file = None
+        for pf in possible_files:
+            if pf.exists():
+                model_file = pf
+                break
+        
+        if model_file is None:
+            raise FileNotFoundError(f"No model file found in {model_path}")
+        
+        state_dict = None
+        # Try loading - safetensors first if that's the file, fallback to torch.load
+        if model_file.suffix == ".safetensors":
+            try:
+                from safetensors.torch import load_file
+                state_dict = load_file(str(model_file))
+            except Exception as e:
+                print(f"   ⚠️ safetensors load failed: {e}, trying torch.load...")
+                state_dict = torch.load(model_file, map_location="cpu")
         else:
-            from safetensors.torch import load_file
-            state_dict = load_file(str(model_file))
+            state_dict = torch.load(model_file, map_location="cpu")
         
         # Load only the trained parts (ctc_head, layer_weights, dropout)
         model_state = model.state_dict()
+        loaded_keys = []
         for key in state_dict:
             if key in model_state:
                 model_state[key] = state_dict[key]
+                loaded_keys.append(key)
         model.load_state_dict(model_state)
-        print(f"   ✓ EarlyFusionModel caricato: {vocab_size} classi, {hubert_name} + {wavlm_name}")
+        print(f"   ✓ EarlyFusionModel caricato da {model_file.name}")
+        print(f"   ✓ Loaded keys: {len(loaded_keys)} ({', '.join(loaded_keys[:5])}...)")
         
     elif is_speechtokenizer:
         print("   Tipo: SpeechTokenizer (Discrete)")
