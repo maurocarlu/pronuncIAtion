@@ -216,7 +216,7 @@ def train_w2v2_bert(
     audio_base_path: str = ".",
     epochs: int = 10,
     batch_size: int = 4,
-    learning_rate: float = 5e-6,  # Very conservative to prevent CTC collapse
+    learning_rate: float = 5e-5,  # Increased to 5e-5 as requested
     resume: bool = False,
 ):
     """Training Wav2Vec2-BERT 2.0 con CTC."""
@@ -314,6 +314,12 @@ def train_w2v2_bert(
     
     def preprocess(batch):
         audio, sr = librosa.load(batch["audio_path"], sr=16000)
+        
+        # 1. Normalization (Target: Zero mean, Unit variance)
+        # SeamlessM4TFeatureExtractor likely expects normalized audio for best performance
+        if len(audio) > 0:
+            audio = (audio - audio.mean()) / (audio.std() + 1e-5)
+            
         inputs = processor(audio, sampling_rate=16000, return_tensors=None)
         # Wav2Vec2Bert uses input_features (not input_values)
         input_features = inputs.input_features[0]
@@ -403,7 +409,8 @@ def train_w2v2_bert(
         per_device_eval_batch_size=batch_size,
         gradient_accumulation_steps=4,
         learning_rate=learning_rate,
-        warmup_steps=2000,  # Extended warmup to prevent CTC collapse
+
+        warmup_ratio=0.1,  # 10% of total steps
         weight_decay=0.001,  # Lower weight decay
         logging_steps=50,
         eval_strategy="steps",
@@ -431,7 +438,7 @@ def train_w2v2_bert(
         eval_dataset=val_ds,
         data_collator=DataCollatorCTCWithPadding(processor),
         compute_metrics=compute_metrics,
-        callbacks=[DriveBackupCallback(), PredictionMonitorCallback(processor, val_ds, print_every=500)],
+        callbacks=[DriveBackupCallback(), PredictionMonitorCallback(processor, val_ds, print_every=100)],
     )
     
     # Resume
@@ -461,7 +468,7 @@ def main():
     parser.add_argument("--output-dir", type=str, default="outputs/w2v2_bert")
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=8)  # Increased for FP16 stability
-    parser.add_argument("--learning-rate", type=float, default=5e-6)  # Conservative LR to prevent CTC collapse
+    parser.add_argument("--learning-rate", type=float, default=5e-5)  # Increased to 5e-5
     parser.add_argument("--resume", action="store_true")
     
     args = parser.parse_args()
