@@ -62,6 +62,7 @@ Per dettagli sulle metriche, vedi **[docs/BENCHMARK_GUIDE.md](docs/BENCHMARK_GUI
 | Wav2Vec2-BERT | 3e-4 | 4 | 10 | Fine-tuning | `train_w2v2_bert.py` |
 | SpeechTokenizer | 1e-3 | 4 | 10 | 2-Stage | `train_speechtokenizer.py` |
 | **Early Fusion** | 1e-4 | 2 | 5 | **Frozen+CTC** | `train_early_fusion.py` |
+| **Wav2Vec2 Phoneme (lv60-pmp)** | **3e-5** | 4 | 10 | Fine-tuning (domain init) | `train_wav2vec2_phoneme.py` |
 
 ---
 
@@ -113,8 +114,9 @@ Combinazione dei due top-performer a livello logit:
 8. **SpeechTokenizer** (`train_speechtokenizer.py`)
 9. **Qwen2-Audio** (`train_qwen_audio.py`) - Linear Probe
 10. **Wav2Vec2-BERT** (`train_w2v2_bert.py`)
-11. **Late Fusion HuBERT+WavLM** (`evaluate_hubert_fusion.py`) - 🆕 NEW
-12. **Early Fusion Multi-Backbone** (`train_early_fusion.py`) - 🆕 NEW
+11. **Wav2Vec2 Phoneme (lv60-pmp)** (`train_wav2vec2_phoneme.py`) - Domain Init
+12. **Late Fusion HuBERT+WavLM** (`evaluate_hubert_fusion.py`) - 🆕 NEW
+13. **Early Fusion Multi-Backbone** (`train_early_fusion.py`) - 🆕 NEW
 
 ---
 

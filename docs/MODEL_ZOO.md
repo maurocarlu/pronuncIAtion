@@ -49,6 +49,32 @@ Versione multilingua di Wav2Vec2. Addestrato su mezza milionata di ore di audio 
 
 ---
 
+## 4. Wav2Vec2 Phoneme (Domain Init)
+
+| Parametro | Valore |
+|-----------|--------|
+| **Backbone** | `facebook/wav2vec2-lv60-pmp` |
+| **Input** | Raw Waveform (16kHz) |
+| **Head** | CTC (`Wav2Vec2ForCTC`) |
+| **Tokenizer** | `Wav2Vec2PhonemeCTCTokenizer` (vocab custom) |
+
+### Caratteristiche
+Questo modello usa l'architettura standard di Wav2Vec2 (la stessa di Wav2Vec2Phoneme) ma parte da un checkpoint orientato al dominio dei fonemi.
+
+**Motivazione scientifica**: "Test di un modello con inizializzazione specifica per il dominio dei fonemi invece che SSL generico".
+
+### Note di Implementazione
+- **Vocab custom**: usa `data/processed/vocab.json`.
+- **do_phonemize=False**: i target `ipa_clean` sono già in formato fonetico.
+- **CTC safety**: `bos_token` e `eos_token` sono impostati a `None` se non presenti nel vocab (evita mismatch negli indici della loss CTC).
+- **Stabilità**: re-inizializzazione `lm_head` per ridurre rischio di blank collapse.
+- **Monitoring**: `PredictionMonitorCallback` ogni 100 step.
+
+### Script
+Vedi `scripts/training/train_wav2vec2_phoneme.py`.
+
+---
+
 ## 5. Whisper (Encoder Only)
 
 | Parametro | Valore |
