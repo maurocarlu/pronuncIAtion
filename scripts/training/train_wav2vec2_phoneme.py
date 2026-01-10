@@ -8,7 +8,7 @@ Test di un modello con inizializzazione specifica per il dominio dei fonemi
 invece che SSL generico.
 
 Specifiche:
-- Backbone: facebook/wav2vec2-lv60-pmp
+- Backbone: facebook/wav2vec2-xlsr-53-espeak-cv-ft
 - Model class: Wav2Vec2ForCTC (architettura identica a Wav2Vec2Phoneme)
 - Tokenizer: Wav2Vec2PhonemeCTCTokenizer (fallback controllato a Wav2Vec2CTCTokenizer)
 - Vocab: usa data/processed/vocab.json (custom)
@@ -261,9 +261,9 @@ def train_wav2vec2_phoneme(
     vocab_size = len(processor.tokenizer)
     print(f"   Custom IPA vocab size: {vocab_size}")
 
-    print("\n📦 Loading model: facebook/wav2vec2-lv60-pmp")
+    print("\n📦 Loading model: facebook/wav2vec2-xlsr-53-espeak-cv-ft")
     model = Wav2Vec2ForCTC.from_pretrained(
-        "facebook/wav2vec2-lv60-pmp",
+        "facebook/wav2vec2-xlsr-53-espeak-cv-ft",
         vocab_size=vocab_size,
         ctc_loss_reduction="mean",
         ctc_zero_infinity=True,

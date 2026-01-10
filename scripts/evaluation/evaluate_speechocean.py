@@ -102,6 +102,7 @@ def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bo
     is_qwen_audio = False
     is_w2v_bert = False
     is_early_fusion = False  # NEW
+    model = None  # Ensure model is initialized
     config = {}
     
     if config_path.exists():
@@ -123,6 +124,25 @@ def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bo
         is_hubert_model = config.get("model_type") == "hubert" or \
                           "hubert" in config.get("architectures", [""])[0].lower() or \
                           "hubert" in str(config.get("_name_or_path", "")).lower()
+    else:
+        print(f"   ⚠️ WARNING: Config file not found at {config_path}")
+        # Fallback detection from path string
+        path_str = str(model_path).lower()
+        if "early_fusion" in path_str:
+            print(f"   ℹ️ Detected 'early_fusion' in path. Forcing Early Fusion mode.")
+            is_early_fusion = True
+            is_w2v_bert = False
+            is_xlsr_model = False
+        elif "w2v-bert" in path_str or "w2v_bert" in path_str:
+             print(f"   ℹ️ Detected 'w2v-bert' in path.")
+             is_w2v_bert = True
+        elif "whisper" in path_str:
+             print(f"   ℹ️ Detected 'whisper' in path.")
+             is_whisper_encoder = True
+        elif "qwen" in path_str:
+             print(f"   ℹ️ Detected 'qwen' in path.")
+             is_qwen_audio = True
+
     
     # Carica modello
     print("\n📦 Caricamento modello...")
@@ -228,27 +248,40 @@ def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bo
         wavlm_name = config.get("wavlm_name", "microsoft/wavlm-base")
         
         # Check if paths are local - try local backup paths before HuggingFace
-        model_base = Path(model_path).parent  # outputs/backup level
+        model_base = Path(model_path).parent  # outputs/backup/early_fusion
         
-        # HuBERT fallback chain: config path -> local backup -> HuggingFace
-        if hubert_name.startswith("/") and not Path(hubert_name).exists():
-            local_hubert = model_base / "hubert_large" / "final_model_hubert"
+        # Determine root backup dir (outputs/backup)
+        # If model_path is a checkpoint inside early_fusion folder:
+        # outputs/backup/early_fusion/checkpoint-X -> parent.parent = outputs/backup
+        if "checkpoint-" in str(Path(model_path).name):
+             backup_root = model_base.parent
+        else:
+             backup_root = model_base
+
+        # HuBERT fallback logic
+        local_hubert = backup_root / "hubert_large" / "final_model_hubert"
+        # If explicitly local path but missing, OR if default HF name but local backup exists -> try local
+        if (hubert_name.startswith("/") and not Path(hubert_name).exists()) or \
+           (hubert_name == "facebook/hubert-large-ls960-ft" and local_hubert.exists()):
+            
             if local_hubert.exists():
                 hubert_name = str(local_hubert)
                 print(f"   ✓ HuBERT: using local backup at {hubert_name}")
             else:
                 hubert_name = "facebook/hubert-large-ls960-ft"
-                print(f"   ⚠️ HuBERT path not found, downloading from HuggingFace...")
+                print(f"   ⚠️ HuBERT path not found at {local_hubert}, downloading from HuggingFace...")
         
-        # WavLM fallback chain: config path -> local backup -> HuggingFace
-        if wavlm_name.startswith("/") and not Path(wavlm_name).exists():
-            local_wavlm = model_base / "wavLM" / "final_model_aug_comb"
+        # WavLM fallback logic
+        local_wavlm = backup_root / "wavLM" / "final_model_aug_comb"
+        if (wavlm_name.startswith("/") and not Path(wavlm_name).exists()) or \
+           (wavlm_name == "microsoft/wavlm-base" and local_wavlm.exists()):
+            
             if local_wavlm.exists():
                 wavlm_name = str(local_wavlm)
                 print(f"   ✓ WavLM: using local backup at {wavlm_name}")
             else:
                 wavlm_name = "microsoft/wavlm-base"
-                print(f"   ⚠️ WavLM path not found, downloading from HuggingFace...")
+                print(f"   ⚠️ WavLM path not found at {local_wavlm}, downloading from HuggingFace...")
             
         use_weighted = config.get("use_weighted_wavlm", True)
         

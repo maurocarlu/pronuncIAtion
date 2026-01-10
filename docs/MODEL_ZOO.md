@@ -53,15 +53,15 @@ Versione multilingua di Wav2Vec2. Addestrato su mezza milionata di ore di audio 
 
 | Parametro | Valore |
 |-----------|--------|
-| **Backbone** | `facebook/wav2vec2-lv60-pmp` |
+| **Backbone** | `facebook/wav2vec2-xlsr-53-espeak-cv-ft` |
 | **Input** | Raw Waveform (16kHz) |
 | **Head** | CTC (`Wav2Vec2ForCTC`) |
 | **Tokenizer** | `Wav2Vec2PhonemeCTCTokenizer` (vocab custom) |
 
 ### Caratteristiche
-Questo modello usa l'architettura standard di Wav2Vec2 (la stessa di Wav2Vec2Phoneme) ma parte da un checkpoint orientato al dominio dei fonemi.
+Questo modello usa l'architettura standard di Wav2Vec2 ma parte da un checkpoint basato su **XLSR-53** (multilingua) già fine-tunato su fonemi (dataset CommonVoice + espeak).
 
-**Motivazione scientifica**: "Test di un modello con inizializzazione specifica per il dominio dei fonemi invece che SSL generico".
+**Motivazione scientifica**: "Test di un modello con inizializzazione specifica e multilingua per il dominio dei fonemi invece che SSL generico".
 
 ### Note di Implementazione
 - **Vocab custom**: usa `data/processed/vocab.json`.
