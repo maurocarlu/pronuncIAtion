@@ -35,6 +35,7 @@ import json
 import os
 import sys
 import warnings
+import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -58,6 +59,57 @@ warnings.filterwarnings("ignore")
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src.data.normalize_ipa import IPANormalizer
+
+
+# =============================================================================
+# ENV HELPERS
+# =============================================================================
+
+
+def _in_colab() -> bool:
+    return "google.colab" in sys.modules or os.environ.get("COLAB_GPU") is not None
+
+
+def _resolve_output_dir_for_colab(output_dir: str, save_to_drive: bool, drive_output_base: Optional[str]) -> str:
+    """Resolve output directory, optionally placing it on Google Drive on Colab.
+
+    Notes:
+    - On Colab, relative paths end up under /content (ephemeral).
+    - If save_to_drive=True and Drive is mounted at /content/drive, write under MyDrive.
+    """
+
+    if not _in_colab() or not save_to_drive:
+        return output_dir
+
+    drive_root = Path("/content/drive")
+    if not drive_root.exists():
+        raise RuntimeError(
+            "Google Drive non sembra montato. In Colab esegui prima: \n"
+            "  from google.colab import drive; drive.mount('/content/drive')"
+        )
+
+    base = Path(drive_output_base) if drive_output_base else drive_root / "MyDrive" / "phoneme_checkpoints"
+    base.mkdir(parents=True, exist_ok=True)
+
+    out_path = Path(output_dir)
+    if out_path.is_absolute():
+        return str(out_path)
+
+    # Se output_dir è relativo, lo tratto come sotto-cartella del backup su Drive
+    return str(base / out_path.as_posix())
+
+
+def _warn_if_ephemeral_colab_output(output_dir: str) -> None:
+    if not _in_colab():
+        return
+    out_path = Path(output_dir)
+    if out_path.is_absolute():
+        return
+    # In Colab, un path relativo è sotto /content (non persistente)
+    print(
+        "\n⚠️  Output directory relativa in Colab: i checkpoint finiranno in /content (non persistente).\n"
+        "   Suggerimento: usa --save-to-drive oppure passa un --output-dir assoluto sotto /content/drive/MyDrive.\n"
+    )
 
 
 # =============================================================================
@@ -429,13 +481,42 @@ def main():
     parser.add_argument("--learning-rate", type=float, default=3e-5)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--no-freeze-feature-encoder", action="store_true")
+    parser.add_argument(
+        "--save-to-drive",
+        action="store_true",
+        help=(
+            "(Colab) Salva checkpoint e modello direttamente su Google Drive. "
+            "Richiede drive montato in /content/drive."
+        ),
+    )
+    parser.add_argument(
+        "--drive-output-base",
+        type=str,
+        default=None,
+        help=(
+            "(Colab) Cartella base su Drive dove salvare gli output quando --save-to-drive è attivo. "
+            "Default: /content/drive/MyDrive/phoneme_checkpoints"
+        ),
+    )
 
     args = parser.parse_args()
+
+    resolved_output_dir = _resolve_output_dir_for_colab(
+        output_dir=args.output_dir,
+        save_to_drive=args.save_to_drive,
+        drive_output_base=args.drive_output_base,
+    )
+    if resolved_output_dir != args.output_dir:
+        print(f"\n💾 Colab/Drive enabled: output_dir -> {resolved_output_dir}")
+    else:
+        _warn_if_ephemeral_colab_output(args.output_dir)
+
+    os.makedirs(resolved_output_dir, exist_ok=True)
 
     train_wav2vec2_phoneme(
         csv_path=args.data_csv,
         vocab_path=args.vocab_path,
-        output_dir=args.output_dir,
+        output_dir=resolved_output_dir,
         audio_base_path=args.audio_base,
         epochs=args.epochs,
         batch_size=args.batch_size,
