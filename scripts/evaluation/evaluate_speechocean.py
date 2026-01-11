@@ -134,14 +134,17 @@ def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bo
             is_w2v_bert = False
             is_xlsr_model = False
         elif "w2v-bert" in path_str or "w2v_bert" in path_str:
-             print(f"   ℹ️ Detected 'w2v-bert' in path.")
-             is_w2v_bert = True
+            print(f"   ℹ️ Detected 'w2v-bert' in path.")
+            is_w2v_bert = True
+        elif "wav2vec2" in path_str or "xlsr" in path_str:
+            print(f"   ℹ️ Detected 'wav2vec2/xlsr' in path.")
+            is_xlsr_model = True
         elif "whisper" in path_str:
-             print(f"   ℹ️ Detected 'whisper' in path.")
-             is_whisper_encoder = True
+            print(f"   ℹ️ Detected 'whisper' in path.")
+            is_whisper_encoder = True
         elif "qwen" in path_str:
-             print(f"   ℹ️ Detected 'qwen' in path.")
-             is_qwen_audio = True
+            print(f"   ℹ️ Detected 'qwen' in path.")
+            is_qwen_audio = True
 
     
     # Carica modello
@@ -1000,13 +1003,19 @@ def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bo
             
             # Predictions - use proper CTC decoding for Whisper/Qwen
             predicted_ids = torch.argmax(logits, dim=-1)
+
+            # Determine padding/blank id for CTC-style decoding & confidence masking
+            pad_token_id = (
+                getattr(processor, 'pad_token_id', None)
+                or getattr(getattr(processor, 'tokenizer', None), 'pad_token_id', 0)
+            )
             
             # Apply CTC greedy decoding for models that need it
             if is_whisper_encoder or is_qwen_audio or is_early_fusion:
                 # Decode each sequence with CTC blank/repeat collapsing
                 predicted_texts = []
                 for seq in predicted_ids:
-                    decoded_ids = ctc_greedy_decode(seq, blank_id=0)
+                    decoded_ids = ctc_greedy_decode(seq, blank_id=pad_token_id)
                     if decoded_ids:
                         text = processor.decode(decoded_ids, skip_special_tokens=True)
                     else:
@@ -1022,7 +1031,6 @@ def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bo
             
             for i, ex in enumerate(batch_examples):
                 # Calculate confidence
-                pad_token_id = getattr(processor, 'pad_token_id', None) or getattr(getattr(processor, 'tokenizer', None), 'pad_token_id', 0)
                 non_pad_mask = predicted_ids[i] != pad_token_id
                 if non_pad_mask.sum() > 0:
                     conf = max_probs[i][non_pad_mask].mean().item()

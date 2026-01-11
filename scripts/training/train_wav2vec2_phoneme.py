@@ -200,6 +200,23 @@ def _load_vocab(vocab_path: str) -> Dict[str, int]:
         return json.load(f)
 
 
+def _is_character_level_vocab(vocab: Dict[str, int]) -> bool:
+    """Heuristic: returns True if the vocab is mostly single-character tokens.
+
+    This matters because Wav2Vec2PhonemeCTCTokenizer expects phoneme tokens
+    (often multi-character like 'tʃ', 'dʒ', 'oʊ'), while Wav2Vec2CTCTokenizer
+    works well with character-level vocabularies.
+    """
+
+    specials = {"[PAD]", "[UNK]", "|", "<pad>", "<unk>", "<s>", "</s>", "[BOS]", "[EOS]"}
+    tokens = [t for t in vocab.keys() if t not in specials]
+    if not tokens:
+        return True
+
+    single = sum(1 for t in tokens if len(t) == 1)
+    return (single / max(len(tokens), 1)) >= 0.95
+
+
 def build_processor(vocab_path: str) -> Wav2Vec2Processor:
     """Crea processor usando vocab custom.
 
@@ -214,46 +231,15 @@ def build_processor(vocab_path: str) -> Wav2Vec2Processor:
     bos_token = None if not has_bos else None
     eos_token = None if not has_eos else None
 
+    # IMPORTANT: auto-select tokenizer type based on vocab granularity.
+    # If vocab is character-level, using Wav2Vec2PhonemeCTCTokenizer will often
+    # map multi-character phonemes to [UNK] and the model can collapse to [UNK].
     tokenizer = None
     tokenizer_init_error: Optional[Exception] = None
 
-    try:
-        from transformers import Wav2Vec2PhonemeCTCTokenizer  # type: ignore
-
-        try:
-            tokenizer = Wav2Vec2PhonemeCTCTokenizer(
-                vocab_path,
-                unk_token="[UNK]",
-                pad_token="[PAD]",
-                word_delimiter_token="|",
-                do_phonemize=False,
-                bos_token=bos_token,
-                eos_token=eos_token,
-            )
-        except TypeError:
-            # Alcune versioni non supportano do_phonemize nel tokenizer
-            tokenizer = Wav2Vec2PhonemeCTCTokenizer(
-                vocab_path,
-                unk_token="[UNK]",
-                pad_token="[PAD]",
-                word_delimiter_token="|",
-                bos_token=bos_token,
-                eos_token=eos_token,
-            )
-
-        print("✓ Using Wav2Vec2PhonemeCTCTokenizer")
-
-    except Exception as e:
-        tokenizer_init_error = e
-
-    if tokenizer is None:
+    use_char_level = _is_character_level_vocab(vocab)
+    if use_char_level:
         from transformers import Wav2Vec2CTCTokenizer
-
-        print(
-            "⚠️ Wav2Vec2PhonemeCTCTokenizer non disponibile; "
-            "fallback a Wav2Vec2CTCTokenizer.\n"
-            f"   (details: {type(tokenizer_init_error).__name__}: {tokenizer_init_error})"
-        )
 
         tokenizer = Wav2Vec2CTCTokenizer(
             vocab_path,
@@ -263,6 +249,50 @@ def build_processor(vocab_path: str) -> Wav2Vec2Processor:
             bos_token=bos_token,
             eos_token=eos_token,
         )
+        print("✓ Using Wav2Vec2CTCTokenizer (character-level vocab detected)")
+    else:
+        try:
+            from transformers import Wav2Vec2PhonemeCTCTokenizer  # type: ignore
+
+            try:
+                tokenizer = Wav2Vec2PhonemeCTCTokenizer(
+                    vocab_path,
+                    unk_token="[UNK]",
+                    pad_token="[PAD]",
+                    word_delimiter_token="|",
+                    do_phonemize=False,
+                    bos_token=bos_token,
+                    eos_token=eos_token,
+                )
+            except TypeError:
+                # Alcune versioni non supportano do_phonemize nel tokenizer
+                tokenizer = Wav2Vec2PhonemeCTCTokenizer(
+                    vocab_path,
+                    unk_token="[UNK]",
+                    pad_token="[PAD]",
+                    word_delimiter_token="|",
+                    bos_token=bos_token,
+                    eos_token=eos_token,
+                )
+            print("✓ Using Wav2Vec2PhonemeCTCTokenizer (phoneme-level vocab detected)")
+        except Exception as e:
+            tokenizer_init_error = e
+
+        if tokenizer is None:
+            from transformers import Wav2Vec2CTCTokenizer
+            print(
+                "⚠️ Wav2Vec2PhonemeCTCTokenizer non disponibile; "
+                "fallback a Wav2Vec2CTCTokenizer.\n"
+                f"   (details: {type(tokenizer_init_error).__name__}: {tokenizer_init_error})"
+            )
+            tokenizer = Wav2Vec2CTCTokenizer(
+                vocab_path,
+                unk_token="[UNK]",
+                pad_token="[PAD]",
+                word_delimiter_token="|",
+                bos_token=bos_token,
+                eos_token=eos_token,
+            )
 
     feature_extractor = Wav2Vec2FeatureExtractor(
         feature_size=1,
@@ -303,6 +333,8 @@ def train_wav2vec2_phoneme(
     learning_rate: float = 3e-5,
     resume: bool = False,
     freeze_feature_encoder: bool = True,
+    max_unk_ratio: float = 0.20,
+    unk_check_samples: int = 200,
 ):
     print("=" * 60)
     print("TRAINING WAV2VEC2 PHONEME (CTC)")
@@ -375,6 +407,47 @@ def train_wav2vec2_phoneme(
         "test": test_ds,
     })
     print(f"   Split: train={len(dataset['train'])}, val={len(dataset['validation'])}, test={len(dataset['test'])}")
+
+    # -------------------------------------------------------------------------
+    # Sanity check: unknown token rate in labels
+    # -------------------------------------------------------------------------
+    unk_id = processor.tokenizer.unk_token_id
+    if unk_id is None:
+        print("\n⚠️  tokenizer.unk_token_id is None; skipping [UNK] sanity check")
+    else:
+        normalizer_for_check = IPANormalizer(mode="strict")
+        n_check = min(max(int(unk_check_samples), 0), len(dataset["train"]))
+        if n_check > 0:
+            unk_count = 0
+            total_count = 0
+            for i in range(n_check):
+                ipa_clean = dataset["train"][i].get("ipa_clean", "")
+                ipa_clean = normalizer_for_check.normalize(ipa_clean)
+                ids = processor.tokenizer(ipa_clean).input_ids
+                unk_count += sum(1 for t in ids if t == unk_id)
+                total_count += len(ids)
+
+            unk_ratio = (unk_count / total_count) if total_count > 0 else 1.0
+            print(
+                "\n🧪 Label sanity check ([UNK] ratio):"
+                f"\n   Samples checked: {n_check}"
+                f"\n   [UNK] tokens:    {unk_count}"
+                f"\n   Total tokens:    {total_count}"
+                f"\n   [UNK] ratio:     {unk_ratio:.2%}"
+                f"\n   Max allowed:     {max_unk_ratio:.2%}"
+            )
+
+            if unk_ratio > max_unk_ratio:
+                raise RuntimeError(
+                    "Too many [UNK] tokens in labels. This usually means the tokenizer/vocab is incompatible "
+                    "with your IPA strings (e.g., phoneme-level tokenizer with character-level vocab, or missing IPA symbols).\n"
+                    f"Computed [UNK] ratio: {unk_ratio:.2%} (max allowed {max_unk_ratio:.2%}).\n"
+                    "Fix suggestions:\n"
+                    "- Ensure your vocab.json contains all IPA symbols produced by your normalizer.\n"
+                    "- If you want phoneme-level tokens (e.g., 'tʃ', 'dʒ', 'oʊ'), build a phoneme-level vocab and retrain.\n"
+                    "- Otherwise, use a character-level tokenizer/vocab (the script auto-detects this).\n"
+                    "You can relax this check with --max-unk-ratio or sample fewer items with --unk-check-samples."
+                )
 
     # Normalizzazione IPA coerente (strict, già usata in build_combined/speechocean)
     ipa_normalizer = IPANormalizer(mode="strict")
@@ -482,6 +555,21 @@ def main():
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--no-freeze-feature-encoder", action="store_true")
     parser.add_argument(
+        "--max-unk-ratio",
+        type=float,
+        default=0.20,
+        help=(
+            "Fail fast if the ratio of [UNK] tokens in label encoding exceeds this threshold "
+            "(computed on a sample of training examples). Default: 0.20"
+        ),
+    )
+    parser.add_argument(
+        "--unk-check-samples",
+        type=int,
+        default=200,
+        help="Number of training samples to use for the [UNK] sanity check. Default: 200",
+    )
+    parser.add_argument(
         "--save-to-drive",
         action="store_true",
         help=(
@@ -523,6 +611,8 @@ def main():
         learning_rate=args.learning_rate,
         resume=args.resume,
         freeze_feature_encoder=not args.no_freeze_feature_encoder,
+        max_unk_ratio=args.max_unk_ratio,
+        unk_check_samples=args.unk_check_samples,
     )
 
 
