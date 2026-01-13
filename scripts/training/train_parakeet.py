@@ -153,7 +153,7 @@ class PredictionMonitorCallback(TrainerCallback):
                     padding=True,
                     return_tensors="pt",
                 )
-                x = feats["input_features"].to(device)
+                x = feats["input_features"].to(device=device, dtype=torch.float16)
             else:
                 x = torch.tensor([sample[self.dataset_input_key]], device=device)
 
@@ -196,6 +196,9 @@ class DataCollatorCTCWithPadding:
                 padding=self.padding,
                 return_tensors="pt",
             )
+            # Parakeet (subsampling conv) spesso è in fp16 quando caricato in 4-bit; evita mismatch input(float32)/bias(float16)
+            if "input_features" in batch:
+                batch["input_features"] = batch["input_features"].to(dtype=torch.float16)
         else:
             input_features = [{self.input_key: f[self.input_key]} for f in features]
             batch = self.processor.feature_extractor.pad(
@@ -479,6 +482,8 @@ def train_parakeet(
         with torch.no_grad():
             for batch in val_loader:
                 batch = {k: (v.to(device) if isinstance(v, torch.Tensor) else v) for k, v in batch.items()}
+                if "input_features" in batch and isinstance(batch["input_features"], torch.Tensor):
+                    batch["input_features"] = batch["input_features"].to(dtype=torch.float16)
                 with torch.cuda.amp.autocast(enabled=torch.cuda.is_available(), dtype=torch.float16):
                     out = model(**batch)
                     logits = out.logits
@@ -504,7 +509,7 @@ def train_parakeet(
             if input_key == "input_features":
                 audio = np.asarray(sample[dataset_input_key], dtype=np.float32)
                 feats = processor.feature_extractor([audio], sampling_rate=16000, padding=True, return_tensors="pt")
-                x = feats["input_features"].to(device)
+                x = feats["input_features"].to(device=device, dtype=torch.float16)
                 out = model(input_features=x)
             else:
                 x = torch.tensor([sample[dataset_input_key]], device=device)
@@ -532,6 +537,8 @@ def train_parakeet(
 
         for step_idx, batch in enumerate(train_loader, start=1):
             batch = {k: (v.to(device) if isinstance(v, torch.Tensor) else v) for k, v in batch.items()}
+            if "input_features" in batch and isinstance(batch["input_features"], torch.Tensor):
+                batch["input_features"] = batch["input_features"].to(dtype=torch.float16)
             with torch.cuda.amp.autocast(enabled=torch.cuda.is_available(), dtype=torch.float16):
                 out = model(**batch)
                 loss = out.loss
