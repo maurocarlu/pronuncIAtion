@@ -24,6 +24,7 @@ import os
 import sys
 import warnings
 from pathlib import Path
+from collections.abc import Mapping
 from typing import Any, Dict, List, Optional
 
 import evaluate
@@ -73,7 +74,8 @@ def _auto_use_4bit(auto_4bit: bool, force_4bit: bool) -> bool:
 
 
 def _extract_input_features(processed: Any) -> Any:
-    if isinstance(processed, dict):
+    # transformers può ritornare BatchFeature (dict-like) invece di dict puro.
+    if isinstance(processed, Mapping) or hasattr(processed, "keys"):
         for key in ("input_features", "features"):
             if key in processed:
                 feats = processed[key]
@@ -83,8 +85,12 @@ def _extract_input_features(processed: Any) -> Any:
                 if isinstance(feats, np.ndarray) and feats.ndim >= 3 and feats.shape[0] == 1:
                     return feats[0]
                 return feats
-        raise KeyError(f"Processor output keys non riconosciute: {list(processed.keys())}")
-    raise TypeError(f"Processor output non dict: {type(processed)}")
+        try:
+            keys = list(processed.keys())
+        except Exception:
+            keys = []
+        raise KeyError(f"Processor output keys non riconosciute: {keys}")
+    raise TypeError(f"Processor output non dict-like: {type(processed)}")
 
 
 def _get_ctc_head(model: nn.Module) -> nn.Module:

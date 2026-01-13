@@ -188,6 +188,7 @@ def train_parakeet(
     hf_token: Optional[str] = None,
     epochs: int = 10,
     batch_size: int = 1,
+    max_samples: Optional[int] = None,
     learning_rate: float = 3e-5,
     warmup_ratio: float = 0.1,
     gradient_accumulation_steps: int = 4,
@@ -309,6 +310,15 @@ def train_parakeet(
     else:
         split = ds.train_test_split(test_size=0.1, seed=42)
         train_ds, val_ds = split["train"], split["test"]
+
+    if max_samples is not None:
+        if max_samples <= 0:
+            raise ValueError("--max-samples deve essere > 0")
+        n_train = min(max_samples, len(train_ds))
+        n_val = min(max_samples, len(val_ds))
+        train_ds = train_ds.select(range(n_train))
+        val_ds = val_ds.select(range(n_val))
+        print(f"   Subsample attivo: Train={n_train} | Val={n_val}")
 
     print(f"   Train: {len(train_ds)} | Val: {len(val_ds)}")
 
@@ -470,6 +480,12 @@ def main():
     )
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument(
+        "--max-samples",
+        type=int,
+        default=None,
+        help="Limita il numero di sample (train e val) per sanity run veloci. Esempio: --max-samples 200",
+    )
     parser.add_argument("--learning-rate", type=float, default=3e-5)
     parser.add_argument("--warmup-ratio", type=float, default=0.1)
     parser.add_argument("--gradient-accumulation-steps", type=int, default=4)
@@ -491,6 +507,7 @@ def main():
         hf_token=args.hf_token,
         epochs=args.epochs,
         batch_size=args.batch_size,
+        max_samples=args.max_samples,
         learning_rate=args.learning_rate,
         warmup_ratio=args.warmup_ratio,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
