@@ -21,6 +21,10 @@ Per dettagli sulle metriche, vedi **[docs/BENCHMARK_GUIDE.md](docs/BENCHMARK_GUI
 | Wav2Vec2-BERT | Mel Spectrogram | 88.58% | 0.3247 | 0.6936 | ❌ Failed (input mismatch) |
 | Whisper Encoder | Mel Spectrogram | ~237% | 0.4510 | 0.7963 | ❌ Failed (CTC not aligned) |
 | Qwen2-Audio | Mel Spectrogram | TBD | TBD | TBD | Linear Probe (encoder frozen) |
+| Data2Vec2 Large | Raw Waveform | TBD | TBD | TBD | New: self-distillation SSL |
+| XLS-R 1B | Raw Waveform | TBD | TBD | TBD | New: scaling test (1B params) |
+| MMS-1B | Raw Waveform | TBD | TBD | TBD | New: massively multilingual (1B) |
+| M-CTC-T (Meta) | Mel Spectrogram | TBD | TBD | TBD | New: Meta Mel-CTC baseline (mctct-large) |
 
 > **⚠️ Key Finding**: Models using **raw waveform input** (`input_values`) all work (PER < 50%). Models using **mel spectrogram** (`input_features`) all fail (PER > 80%). See [ARCHITECTURE_DETAILS.md](ARCHITECTURE_DETAILS.md#8--input-types-vs-performance---critical-analysis) for analysis.
 
@@ -63,6 +67,10 @@ Per dettagli sulle metriche, vedi **[docs/BENCHMARK_GUIDE.md](docs/BENCHMARK_GUI
 | SpeechTokenizer | 1e-3 | 4 | 10 | 2-Stage | `train_speechtokenizer.py` |
 | **Early Fusion** | 1e-4 | 2 | 5 | **Frozen+CTC** | `train_early_fusion.py` |
 | **Wav2Vec2 Phoneme (lv60-pmp)** | **3e-5** | 4 | 10 | Fine-tuning (domain init) | `train_wav2vec2_phoneme.py` |
+| **Data2Vec2 Large** | **3e-5** | 4 | 10 | Fine-tuning (CTC) | `train_data2vec2.py` |
+| **XLS-R 1B** | **3e-5** | 2 | 10 | Fine-tuning (CTC) | `train_xlsr_1b.py` |
+| **MMS-1B** | **3e-5** | 4 | 10 | Fine-tuning (CTC) | `train_mms_1b.py` |
+| **M-CTC-T (Meta)** | **3e-5** | 2 | 10 | Fine-tuning (CTC) | `train_mctct.py` |
 
 ---
 
@@ -115,8 +123,12 @@ Combinazione dei due top-performer a livello logit:
 9. **Qwen2-Audio** (`train_qwen_audio.py`) - Linear Probe
 10. **Wav2Vec2-BERT** (`train_w2v2_bert.py`)
 11. **Wav2Vec2 Phoneme (lv60-pmp)** (`train_wav2vec2_phoneme.py`) - Domain Init
-12. **Late Fusion HuBERT+WavLM** (`evaluate_hubert_fusion.py`) - 🆕 NEW
-13. **Early Fusion Multi-Backbone** (`train_early_fusion.py`) - 🆕 NEW
+12. **Data2Vec2 Large** (`train_data2vec2.py`) - 🆕 NEW
+13. **XLS-R 1B** (`train_xlsr_1b.py`) - 🆕 NEW
+14. **MMS-1B** (`train_mms_1b.py`) - 🆕 NEW
+15. **M-CTC-T (Meta)** (`train_mctct.py`) - 🆕 NEW
+16. **Late Fusion HuBERT+WavLM** (`evaluate_hubert_fusion.py`) - 🆕 NEW
+17. **Early Fusion Multi-Backbone** (`train_early_fusion.py`) - 🆕 NEW
 
 ---
 
@@ -128,3 +140,4 @@ Combinazione dei due top-performer a livello logit:
 4. Training Early Fusion su GPU con ≥20GB VRAM
 5. Generare report qualitativo con `analyze_model_gap.py`
 6. Aggiornare tabella risultati con nuovo record AUC
+7. Lanciare benchmark: Data2Vec2 Large / XLS-R 1B / MMS-1B / M-CTC-T

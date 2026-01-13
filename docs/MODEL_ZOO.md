@@ -49,6 +49,55 @@ Versione multilingua di Wav2Vec2. Addestrato su mezza milionata di ore di audio 
 
 ---
 
+## 3b. XLS-R (1B) ⭐ NEW
+
+| Parametro | Valore |
+|-----------|--------|
+| **Backbone** | `facebook/wav2vec2-xlsr-1b` |
+| **Lingue** | 128 (Pre-training multilingua) |
+| **Parametri** | ~1B |
+| **Input** | Raw Waveform (16kHz) |
+| **Head** | CTC (`Wav2Vec2ForCTC`) |
+
+### Caratteristiche
+Versione “scaled” di XLS-R per testare l’ipotesi: più capacità → miglior AUC (detection) e/o PER su accenti non-nativi.
+
+### Note di Implementazione
+- **Vocab custom**: `data/processed/vocab.json`
+- **Tokenizer**: `bos_token=None`, `eos_token=None`
+- **Stabilità CTC**: `ctc_zero_infinity=True` + re-init `lm_head`
+- **Memoria**: `fp16=True`, `gradient_checkpointing=True`, **auto 4-bit** se VRAM < 16GB
+- **Monitoring**: `PredictionMonitorCallback` ogni 100 step
+
+### Script
+Vedi `scripts/training/train_xlsr_1b.py`.
+
+---
+
+## 3c. Data2Vec 2.0 (Large) ⭐ NEW
+
+| Parametro | Valore |
+|-----------|--------|
+| **Backbone** | `facebook/data2vec2-large-960h` |
+| **Input** | Raw Waveform (16kHz) |
+| **Head** | CTC (`Wav2Vec2ForCTC`) |
+| **Pre-training** | Self-distillation (teacher/student) |
+
+### Caratteristiche
+Evoluzione di Wav2Vec2: tende a convergere più rapidamente e con training più stabile grazie all’obiettivo di self-distillation.
+
+### Note di Implementazione
+- **Vocab custom**: `data/processed/vocab.json`
+- **Tokenizer**: `bos_token=None`, `eos_token=None`
+- **Hyperparams benchmark**: LR `3e-5`, `warmup_ratio=0.1`, `gradient_accumulation_steps=4`
+- **Memoria**: `fp16=True`, `gradient_checkpointing=True`
+- **Monitoring**: `PredictionMonitorCallback` ogni 100 step
+
+### Script
+Vedi `scripts/training/train_data2vec2.py`.
+
+---
+
 ## 4. Wav2Vec2 Phoneme (Domain Init)
 
 | Parametro | Valore |
@@ -180,6 +229,38 @@ Usa adapter per lingua, ma qui lo usiamo con CTC head custom sul nostro vocab IP
 - **Batch Size**: 8 (con FP16)
 
 **Motivazione**: Testare se il pre-training multilingue massivo migliora il riconoscimento fonetico.
+
+### Script
+- Benchmark script: `scripts/training/train_mms_1b.py`
+- Script legacy/esteso: `scripts/training/train_mms.py`
+
+---
+
+## 9b. M-CTC-T (Meta) ⭐ NEW
+
+| Parametro | Valore |
+|-----------|--------|
+| **Checkpoint** | `facebook/mctct-large` |
+| **Input** | Mel Spectrogram (80 bins) |
+| **Processor** | `MctctProcessor` |
+| **Model** | `MctctForCTC` |
+
+### Caratteristiche
+M-CTC-T è un modello CTC di Meta progettato per lavorare su **spettrogrammi Mel** (invece che su waveform raw).
+Questo esperimento serve a confrontare in modo “fair” l’efficacia di:
+- **Mel-CTC (Meta)**: feature acustiche esplicite (Mel)
+- **Raw-CTC (Meta)**: SSL su waveform (es. XLS-R, MMS)
+
+### Note di Implementazione
+- **Vocab custom**: `data/processed/vocab.json`
+- **Tokenizer**: `bos_token=None`, `eos_token=None`
+- **Init head**: re-init `lm_head` (std=0.02), `ignore_mismatched_sizes=True`
+- **Hyperparams benchmark**: LR `3e-5`, `warmup_ratio=0.1`, `gradient_accumulation_steps=4`
+- **Memoria**: `fp16=True`, `gradient_checkpointing=True`, **auto 4-bit** (linear probing: solo `lm_head`) se VRAM < 16GB
+- **Monitoring**: `PredictionMonitorCallback` ogni 100 step
+
+### Script
+Vedi `scripts/training/train_mctct.py`.
 
 ---
 
