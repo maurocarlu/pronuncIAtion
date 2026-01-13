@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Training script per XLS-R 1B (Raw Waveform) con CTC.
 
-Checkpoint: facebook/wav2vec2-xlsr-1b
+Checkpoint: facebook/wav2vec2-xls-r-1b
 
 Linee guida:
 - Vocab custom: data/processed/vocab.json
@@ -195,7 +195,7 @@ def train_xlsr_1b(
             bnb_4bit_compute_dtype=torch.float16,
         )
         model = Wav2Vec2ForCTC.from_pretrained(
-            "facebook/wav2vec2-xlsr-1b",
+            "facebook/wav2vec2-xls-r-1b",
             quantization_config=bnb_config,
             **model_kwargs,
         )
@@ -206,7 +206,7 @@ def train_xlsr_1b(
         nn.init.zeros_(model.lm_head.bias)
     else:
         print("\n📦 Loading XLS-R 1B in fp16...")
-        model = Wav2Vec2ForCTC.from_pretrained("facebook/wav2vec2-xlsr-1b", **model_kwargs)
+        model = Wav2Vec2ForCTC.from_pretrained("facebook/wav2vec2-xls-r-1b", **model_kwargs)
         model.freeze_feature_encoder()
         nn.init.normal_(model.lm_head.weight, mean=0.0, std=0.02)
         nn.init.zeros_(model.lm_head.bias)

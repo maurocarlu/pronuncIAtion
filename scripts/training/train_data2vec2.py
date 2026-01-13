@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Training script per Data2Vec 2.0 Large (Raw Waveform) con CTC.
 
-Checkpoint: facebook/data2vec2-large-960h
+Checkpoint: facebook/data2vec-audio-large-960h
 
 Linee guida:
 - Vocab custom: data/processed/vocab.json
@@ -142,7 +142,7 @@ def train_data2vec2(
     print(f"   Vocab size: {vocab_size}")
 
     model = Wav2Vec2ForCTC.from_pretrained(
-        "facebook/data2vec2-large-960h",
+        "facebook/data2vec-audio-large-960h",
         vocab_size=vocab_size,
         ctc_loss_reduction="mean",
         ctc_zero_infinity=True,

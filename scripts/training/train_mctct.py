@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# NOTE: M-CTC-T richiede una versione recente di transformers. Se vedi errori su MctctProcessor/MctctForCTC:
+#   pip install --upgrade transformers
 """Training script per M-CTC-T (Meta) con CTC su input Mel Spectrogram.
 
 Checkpoint: facebook/mctct-large
