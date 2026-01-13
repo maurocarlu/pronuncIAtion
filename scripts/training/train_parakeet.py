@@ -97,6 +97,23 @@ def _detect_model_input_key(processor: ParakeetProcessor) -> str:
     raise RuntimeError("Impossibile determinare la chiave input dal ParakeetProcessor")
 
 
+def _get_ctc_head(model: nn.Module) -> nn.Module:
+    """Ritorna la head CTC del modello (compatibile con modelli che usano lm_head o ctc_head)."""
+    if hasattr(model, "lm_head"):
+        return getattr(model, "lm_head")
+    if hasattr(model, "ctc_head"):
+        return getattr(model, "ctc_head")
+    raise AttributeError("Il modello non espone né 'lm_head' né 'ctc_head'.")
+
+
+def _reinit_ctc_head(head: nn.Module, std: float = 0.02) -> None:
+    """Re-inizializza pesi/bias della CTC head in modo robusto."""
+    if hasattr(head, "weight") and getattr(head, "weight") is not None:
+        nn.init.normal_(head.weight, mean=0.0, std=std)
+    if hasattr(head, "bias") and getattr(head, "bias") is not None:
+        nn.init.zeros_(head.bias)
+
+
 class PredictionMonitorCallback(TrainerCallback):
     """Stampa predizione esempio ogni N step per monitorare blank collapse."""
 
@@ -258,13 +275,9 @@ def train_parakeet(
     for p in model.parameters():
         p.requires_grad = False
 
-    if not hasattr(model, "lm_head"):
-        raise AttributeError("ParakeetForCTC non espone 'lm_head' (richiesta dal benchmark).")
-
-    model.lm_head.requires_grad_(True)
-    nn.init.normal_(model.lm_head.weight, mean=0.0, std=0.02)
-    if getattr(model.lm_head, "bias", None) is not None:
-        nn.init.zeros_(model.lm_head.bias)
+    ctc_head = _get_ctc_head(model)
+    ctc_head.requires_grad_(True)
+    _reinit_ctc_head(ctc_head, std=0.02)
 
     try:
         model.gradient_checkpointing_enable()

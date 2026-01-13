@@ -87,6 +87,23 @@ def _extract_input_features(processed: Any) -> Any:
     raise TypeError(f"Processor output non dict: {type(processed)}")
 
 
+def _get_ctc_head(model: nn.Module) -> nn.Module:
+    """Ritorna la head CTC del modello (compatibile con modelli che usano lm_head o ctc_head)."""
+    if hasattr(model, "lm_head"):
+        return getattr(model, "lm_head")
+    if hasattr(model, "ctc_head"):
+        return getattr(model, "ctc_head")
+    raise AttributeError("Il modello non espone né 'lm_head' né 'ctc_head'.")
+
+
+def _reinit_ctc_head(head: nn.Module, std: float = 0.02) -> None:
+    """Re-inizializza pesi/bias della CTC head in modo robusto."""
+    if hasattr(head, "weight") and getattr(head, "weight") is not None:
+        nn.init.normal_(head.weight, mean=0.0, std=std)
+    if hasattr(head, "bias") and getattr(head, "bias") is not None:
+        nn.init.zeros_(head.bias)
+
+
 class PredictionMonitorCallback(TrainerCallback):
     """Stampa predizione esempio ogni N step per monitorare blank collapse."""
 
@@ -245,9 +262,9 @@ def train_mctct(
         )
         for p in model.parameters():
             p.requires_grad = False
-        model.lm_head.requires_grad_(True)
-        nn.init.normal_(model.lm_head.weight, mean=0.0, std=0.02)
-        nn.init.zeros_(model.lm_head.bias)
+        ctc_head = _get_ctc_head(model)
+        ctc_head.requires_grad_(True)
+        _reinit_ctc_head(ctc_head, std=0.02)
     else:
         print("\n📦 Loading M-CTC-T in fp16...")
         model = model_loader(
@@ -256,8 +273,8 @@ def train_mctct(
             token=hf_token,
             **model_kwargs,
         )
-        nn.init.normal_(model.lm_head.weight, mean=0.0, std=0.02)
-        nn.init.zeros_(model.lm_head.bias)
+        ctc_head = _get_ctc_head(model)
+        _reinit_ctc_head(ctc_head, std=0.02)
 
     try:
         model.gradient_checkpointing_enable()
