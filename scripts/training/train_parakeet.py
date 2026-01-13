@@ -30,14 +30,15 @@ import numpy as np
 import torch
 import torch.nn as nn
 from datasets import load_dataset
+from torch.utils.data import DataLoader
 from transformers import ParakeetForCTC, ParakeetProcessor
 from transformers import (
     BitsAndBytesConfig,
-    Trainer,
     TrainerCallback,
     TrainingArguments,
     Wav2Vec2CTCTokenizer,
 )
+from transformers.optimization import get_linear_schedule_with_warmup
 
 warnings.filterwarnings("ignore")
 
@@ -305,6 +306,7 @@ def train_parakeet(
     model = ParakeetForCTC.from_pretrained(
         checkpoint,
         quantization_config=bnb_config,
+        device_map="auto",
         force_download=force_download,
         token=hf_token,
         **model_kwargs,
@@ -442,66 +444,137 @@ def train_parakeet(
         preds, labels2 = zip(*valid)
         return {"cer": cer_metric.compute(predictions=preds, references=labels2)}
 
-    training_args = TrainingArguments(
-        output_dir=output_dir,
-        num_train_epochs=epochs,
-        per_device_train_batch_size=batch_size,
-        per_device_eval_batch_size=batch_size,
-        gradient_accumulation_steps=gradient_accumulation_steps,
-        learning_rate=learning_rate,
-        warmup_ratio=warmup_ratio,
+    # NOTE: Transformers Trainer (versioni recenti) blocca il training su modelli puramente quantizzati.
+    # Qui facciamo un training loop PyTorch che allena SOLO la ctc_head (linear probing) mantenendo 4-bit sul backbone.
+
+    os.makedirs(output_dir, exist_ok=True)
+    device = next(ctc_head.parameters()).device
+
+    collator = DataCollatorCTCWithPadding(processor, input_key=input_key)
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, collate_fn=collator)
+    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, collate_fn=collator)
+
+    optimizer = torch.optim.AdamW(
+        [p for p in model.parameters() if p.requires_grad],
+        lr=learning_rate,
         weight_decay=0.01,
-        logging_steps=50,
-        eval_strategy="steps",
-        eval_steps=500,
-        save_strategy="steps",
-        save_steps=500,
-        save_total_limit=2,
-        load_best_model_at_end=True,
-        metric_for_best_model="cer",
-        greater_is_better=False,
-        fp16=True,
-        bf16=False,
-        dataloader_num_workers=0,
-        group_by_length=False,
-        gradient_checkpointing=True,
-        max_grad_norm=1.0,
-        report_to="none",
-        remove_unused_columns=False,
     )
 
-    trainer = Trainer(
-        model=model,
-        args=training_args,
-        train_dataset=train_ds,
-        eval_dataset=val_ds,
-        data_collator=DataCollatorCTCWithPadding(processor, input_key=input_key),
-        compute_metrics=compute_metrics,
-        callbacks=[
-            PredictionMonitorCallback(
-                tokenizer,
-                processor,
-                val_ds,
-                input_key=input_key,
-                dataset_input_key=dataset_input_key,
-                print_every=100,
-            )
-        ],
-    )
+    steps_per_epoch = max(1, int(np.ceil(len(train_loader) / max(1, gradient_accumulation_steps))))
+    total_steps = epochs * steps_per_epoch
+    warmup_steps = int(total_steps * warmup_ratio)
+    scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps, num_training_steps=total_steps)
 
-    checkpoint_path = None
-    if resume:
-        checkpoints = list(Path(output_dir).glob("checkpoint-*"))
-        if checkpoints:
-            checkpoints = sorted(checkpoints, key=lambda x: int(x.name.split("-")[1]))
-            checkpoint_path = str(checkpoints[-1])
-            print(f"\n🔄 Resuming from: {checkpoint_path}")
+    scaler = torch.cuda.amp.GradScaler(enabled=torch.cuda.is_available())
 
-    print("\n🚀 Starting training...")
-    trainer.train(resume_from_checkpoint=checkpoint_path)
+    def _decode_batch(logits: torch.Tensor) -> List[str]:
+        pred_ids = torch.argmax(logits, dim=-1)
+        pred_ids = pred_ids.detach().cpu().numpy()
+        return tokenizer.batch_decode(pred_ids)
+
+    def _eval_cer() -> float:
+        model.eval()
+        preds: List[str] = []
+        refs: List[str] = []
+        with torch.no_grad():
+            for batch in val_loader:
+                batch = {k: (v.to(device) if isinstance(v, torch.Tensor) else v) for k, v in batch.items()}
+                with torch.cuda.amp.autocast(enabled=torch.cuda.is_available(), dtype=torch.float16):
+                    out = model(**batch)
+                    logits = out.logits
+
+                pred_str = _decode_batch(logits)
+                label_ids = batch["labels"].detach().cpu().numpy()
+                label_ids[label_ids == -100] = tokenizer.pad_token_id
+                label_str = tokenizer.batch_decode(label_ids, group_tokens=False)
+
+                for p, r in zip(pred_str, label_str):
+                    if r.strip():
+                        preds.append(p)
+                        refs.append(r)
+
+        if not refs:
+            return 1.0
+        return float(cer_metric.compute(predictions=preds, references=refs))
+
+    def _print_sample(step: int) -> None:
+        try:
+            model.eval()
+            sample = val_ds[0]
+            if input_key == "input_features":
+                audio = np.asarray(sample[dataset_input_key], dtype=np.float32)
+                feats = processor.feature_extractor([audio], sampling_rate=16000, padding=True, return_tensors="pt")
+                x = feats["input_features"].to(device)
+                out = model(input_features=x)
+            else:
+                x = torch.tensor([sample[dataset_input_key]], device=device)
+                out = model(input_values=x)
+            logits = out.logits
+            pred = tokenizer.decode(torch.argmax(logits, dim=-1)[0])
+            target_ids = [i for i in sample["labels"] if i != -100]
+            target = tokenizer.decode(target_ids)
+            print(f"\n📊 [Step {step}] Sample Prediction:")
+            print(f"   Target: {target[:80]}{'...' if len(target) > 80 else ''}")
+            print(f"   Pred:   {pred[:80]}{'...' if len(pred) > 80 else ''}")
+        except Exception as e:
+            print(f"\n⚠️ Prediction monitor error: {e}")
+        finally:
+            model.train()
+
+    print("\n🚀 Starting training (manual loop)...")
+    model.train()
+    global_step = 0
+    best_cer = None
+
+    for epoch in range(1, epochs + 1):
+        running_loss = 0.0
+        optimizer.zero_grad(set_to_none=True)
+
+        for step_idx, batch in enumerate(train_loader, start=1):
+            batch = {k: (v.to(device) if isinstance(v, torch.Tensor) else v) for k, v in batch.items()}
+            with torch.cuda.amp.autocast(enabled=torch.cuda.is_available(), dtype=torch.float16):
+                out = model(**batch)
+                loss = out.loss
+
+            loss_to_backprop = loss / max(1, gradient_accumulation_steps)
+            scaler.scale(loss_to_backprop).backward()
+            running_loss += float(loss.detach().cpu())
+
+            if step_idx % gradient_accumulation_steps == 0:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(ctc_head.parameters(), 1.0)
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad(set_to_none=True)
+                scheduler.step()
+
+                global_step += 1
+
+                if global_step % 50 == 0:
+                    avg_loss = running_loss / max(1, 50 * gradient_accumulation_steps)
+                    running_loss = 0.0
+                    print(f"[Epoch {epoch}/{epochs}] step={global_step}/{total_steps} loss={avg_loss:.4f}")
+
+                if global_step % 100 == 0:
+                    _print_sample(global_step)
+
+        cer = _eval_cer()
+        print(f"\n✅ Epoch {epoch} CER: {cer:.4f}")
+
+        if best_cer is None or cer < best_cer:
+            best_cer = cer
+            best_dir = Path(output_dir) / "best_model"
+            best_dir.mkdir(parents=True, exist_ok=True)
+            model.save_pretrained(str(best_dir))
+            try:
+                processor.save_pretrained(str(best_dir))
+            except Exception:
+                tokenizer.save_pretrained(str(best_dir))
+            print(f"✓ Best model saved: {best_dir}")
 
     final_path = Path(output_dir) / "final_model"
-    trainer.save_model(str(final_path))
+    final_path.mkdir(parents=True, exist_ok=True)
+    model.save_pretrained(str(final_path))
     try:
         processor.save_pretrained(str(final_path))
     except Exception:
