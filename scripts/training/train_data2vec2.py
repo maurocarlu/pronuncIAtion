@@ -28,12 +28,12 @@ import torch
 import torch.nn as nn
 from datasets import load_dataset
 from transformers import (
+    AutoFeatureExtractor,
+    AutoModelForCTC,
     Trainer,
     TrainerCallback,
     TrainingArguments,
     Wav2Vec2CTCTokenizer,
-    Wav2Vec2FeatureExtractor,
-    Wav2Vec2ForCTC,
     Wav2Vec2Processor,
 )
 
@@ -115,6 +115,7 @@ def train_data2vec2(
     warmup_ratio: float = 0.1,
     gradient_accumulation_steps: int = 4,
     resume: bool = False,
+    force_download: bool = False,
 ):
     print("=" * 60)
     print("TRAINING DATA2VEC 2.0 LARGE - CTC")
@@ -129,26 +130,44 @@ def train_data2vec2(
         eos_token=None,
     )
 
-    feature_extractor = Wav2Vec2FeatureExtractor(
-        feature_size=1,
-        sampling_rate=16000,
-        padding_value=0.0,
-        do_normalize=True,
-        return_attention_mask=True,
+    # Data2Vec audio models are compatible with the Wav2Vec2-style feature extractor.
+    # Using AutoFeatureExtractor keeps this robust across transformers versions.
+    feature_extractor = AutoFeatureExtractor.from_pretrained(
+        "facebook/data2vec-audio-large-960h",
+        force_download=force_download,
     )
 
     processor = Wav2Vec2Processor(feature_extractor=feature_extractor, tokenizer=tokenizer)
     vocab_size = len(tokenizer)
     print(f"   Vocab size: {vocab_size}")
 
-    model = Wav2Vec2ForCTC.from_pretrained(
-        "facebook/data2vec-audio-large-960h",
+    model_kwargs: Dict[str, Any] = dict(
         vocab_size=vocab_size,
         ctc_loss_reduction="mean",
         ctc_zero_infinity=True,
         pad_token_id=tokenizer.pad_token_id,
         ignore_mismatched_sizes=True,
     )
+
+    try:
+        model = AutoModelForCTC.from_pretrained(
+            "facebook/data2vec-audio-large-960h",
+            force_download=force_download,
+            **model_kwargs,
+        )
+    except ValueError as e:
+        # On some environments (e.g., Kaggle) a partial HF cache download can surface as
+        # "state dictionary ... corrupted". Retry once with force_download.
+        msg = str(e).lower()
+        if (not force_download) and ("state dictionary" in msg or "corrupted" in msg):
+            print("\n⚠️ Detected a possibly corrupted cached checkpoint. Retrying with --force-download...")
+            model = AutoModelForCTC.from_pretrained(
+                "facebook/data2vec-audio-large-960h",
+                force_download=True,
+                **model_kwargs,
+            )
+        else:
+            raise
 
     model.freeze_feature_encoder()
     nn.init.normal_(model.lm_head.weight, mean=0.0, std=0.02)
@@ -319,6 +338,11 @@ def main():
     parser.add_argument("--warmup-ratio", type=float, default=0.1)
     parser.add_argument("--gradient-accumulation-steps", type=int, default=4)
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument(
+        "--force-download",
+        action="store_true",
+        help="Force re-download of the HuggingFace checkpoint (fixes corrupted cache issues).",
+    )
 
     args = parser.parse_args()
 
@@ -333,6 +357,7 @@ def main():
         warmup_ratio=args.warmup_ratio,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         resume=args.resume,
+        force_download=args.force_download,
     )
 
 

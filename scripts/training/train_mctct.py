@@ -32,6 +32,8 @@ import torch
 import torch.nn as nn
 from datasets import load_dataset
 from transformers import (
+    AutoFeatureExtractor,
+    AutoModelForCTC,
     BitsAndBytesConfig,
     Trainer,
     TrainerCallback,
@@ -156,6 +158,7 @@ def train_mctct(
     resume: bool = False,
     auto_4bit: bool = True,
     use_4bit: bool = False,
+    force_download: bool = False,
 ):
     print("=" * 60)
     print("TRAINING M-CTC-T (facebook/mctct-large) - CTC")
@@ -173,21 +176,44 @@ def train_mctct(
     vocab_size = len(tokenizer)
     print(f"   Vocab size: {vocab_size}")
 
-    # Processor (feature extractor from checkpoint) + custom tokenizer
+    # Processor/model classes: in some transformers versions these are exposed as MCTCT* (uppercase).
+    # To be robust across environments, we try a few imports and then fall back to Auto*.
+    MctctProcessor = None
+    MctctForCTC = None
     try:
-        from transformers import MctctProcessor, MctctForCTC
-    except Exception as e:
-        raise ImportError(
-            "MctctProcessor/MctctForCTC non disponibili. "
-            "Aggiorna transformers a una versione che include M-CTC-T."
-        ) from e
+        from transformers import MCTCTProcessor as MctctProcessor  # type: ignore
+        from transformers import MCTCTForCTC as MctctForCTC  # type: ignore
+    except Exception:
+        try:
+            from transformers import MctctProcessor as MctctProcessor  # type: ignore
+            from transformers import MctctForCTC as MctctForCTC  # type: ignore
+        except Exception:
+            MctctProcessor = None
+            MctctForCTC = None
 
-    base_processor = MctctProcessor.from_pretrained(CHECKPOINT)
-    try:
-        processor = MctctProcessor(feature_extractor=base_processor.feature_extractor, tokenizer=tokenizer)
-    except TypeError:
-        processor = base_processor
-        processor.tokenizer = tokenizer
+    if MctctProcessor is not None:
+        base_processor = MctctProcessor.from_pretrained(CHECKPOINT, force_download=force_download)
+        try:
+            processor = MctctProcessor(feature_extractor=base_processor.feature_extractor, tokenizer=tokenizer)
+        except TypeError:
+            processor = base_processor
+            processor.tokenizer = tokenizer
+        model_loader = MctctForCTC.from_pretrained if MctctForCTC is not None else AutoModelForCTC.from_pretrained
+    else:
+        # Fallback: use feature extractor + custom tokenizer. This avoids relying on
+        # top-level exports (MctctProcessor) that may be missing.
+        feature_extractor = AutoFeatureExtractor.from_pretrained(CHECKPOINT, force_download=force_download)
+
+        class _Processor:
+            def __init__(self, feature_extractor, tokenizer):
+                self.feature_extractor = feature_extractor
+                self.tokenizer = tokenizer
+
+            def __call__(self, *args, **kwargs):
+                return self.feature_extractor(*args, **kwargs)
+
+        processor = _Processor(feature_extractor=feature_extractor, tokenizer=tokenizer)
+        model_loader = AutoModelForCTC.from_pretrained
 
     want_4bit = _auto_use_4bit(auto_4bit=auto_4bit, force_4bit=use_4bit)
     vram_gb = _get_vram_gb()
@@ -217,9 +243,10 @@ def train_mctct(
             bnb_4bit_quant_type="nf4",
             bnb_4bit_compute_dtype=torch.float16,
         )
-        model = MctctForCTC.from_pretrained(
+        model = model_loader(
             CHECKPOINT,
             quantization_config=bnb_config,
+            force_download=force_download,
             **model_kwargs,
         )
         for p in model.parameters():
@@ -229,7 +256,11 @@ def train_mctct(
         nn.init.zeros_(model.lm_head.bias)
     else:
         print("\n📦 Loading M-CTC-T in fp16...")
-        model = MctctForCTC.from_pretrained(CHECKPOINT, **model_kwargs)
+        model = model_loader(
+            CHECKPOINT,
+            force_download=force_download,
+            **model_kwargs,
+        )
         nn.init.normal_(model.lm_head.weight, mean=0.0, std=0.02)
         nn.init.zeros_(model.lm_head.bias)
 
@@ -388,6 +419,11 @@ def main():
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--auto-4bit", action="store_true", default=True)
     parser.add_argument("--use-4bit", action="store_true", help="Force 4-bit (overrides auto)")
+    parser.add_argument(
+        "--force-download",
+        action="store_true",
+        help="Force re-download of the HuggingFace checkpoint (fixes corrupted cache issues).",
+    )
 
     args = parser.parse_args()
 
@@ -404,6 +440,7 @@ def main():
         resume=args.resume,
         auto_4bit=args.auto_4bit,
         use_4bit=args.use_4bit,
+        force_download=args.force_download,
     )
 
 
