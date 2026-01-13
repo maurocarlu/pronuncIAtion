@@ -117,10 +117,20 @@ def _reinit_ctc_head(head: nn.Module, std: float = 0.02) -> None:
 class PredictionMonitorCallback(TrainerCallback):
     """Stampa predizione esempio ogni N step per monitorare blank collapse."""
 
-    def __init__(self, tokenizer: Wav2Vec2CTCTokenizer, eval_dataset, input_key: str, print_every: int = 100):
+    def __init__(
+        self,
+        tokenizer: Wav2Vec2CTCTokenizer,
+        processor: ParakeetProcessor,
+        eval_dataset,
+        input_key: str,
+        dataset_input_key: str,
+        print_every: int = 100,
+    ):
         self.tokenizer = tokenizer
+        self.processor = processor
         self.eval_dataset = eval_dataset
         self.input_key = input_key
+        self.dataset_input_key = dataset_input_key
         self.print_every = print_every
 
     def on_step_end(self, args, state, control, model=None, **kwargs):
@@ -132,7 +142,19 @@ class PredictionMonitorCallback(TrainerCallback):
         try:
             model.eval()
             sample = self.eval_dataset[0]
-            x = torch.tensor([sample[self.input_key]], device=next(model.parameters()).device)
+
+            device = next(model.parameters()).device
+            if self.input_key == "input_features":
+                audio = np.asarray(sample[self.dataset_input_key], dtype=np.float32)
+                feats = self.processor.feature_extractor(
+                    [audio],
+                    sampling_rate=16000,
+                    padding=True,
+                    return_tensors="pt",
+                )
+                x = feats["input_features"].to(device)
+            else:
+                x = torch.tensor([sample[self.dataset_input_key]], device=device)
 
             with torch.no_grad():
                 out = model(**{self.input_key: x})
@@ -165,12 +187,20 @@ class DataCollatorCTCWithPadding:
         self.padding = padding
 
     def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
-        input_features = [{self.input_key: f[self.input_key]} for f in features]
+        if self.input_key == "input_features":
+            audio = [np.asarray(f["input_values"], dtype=np.float32) for f in features]
+            batch = self.processor.feature_extractor(
+                audio,
+                sampling_rate=16000,
+                padding=self.padding,
+                return_tensors="pt",
+            )
+        else:
+            input_features = [{self.input_key: f[self.input_key]} for f in features]
+            batch = self.processor.feature_extractor.pad(
+                input_features, padding=self.padding, return_tensors="pt"
+            )
         label_features = [{"input_ids": f["labels"]} for f in features]
-
-        batch = self.processor.feature_extractor.pad(
-            input_features, padding=self.padding, return_tensors="pt"
-        )
         labels_batch = self.processor.tokenizer.pad(
             label_features, padding=self.padding, return_tensors="pt"
         )
@@ -189,6 +219,7 @@ def train_parakeet(
     epochs: int = 10,
     batch_size: int = 1,
     max_samples: Optional[int] = None,
+    precompute_features: bool = False,
     learning_rate: float = 3e-5,
     warmup_ratio: float = 0.1,
     gradient_accumulation_steps: int = 4,
@@ -235,6 +266,13 @@ def train_parakeet(
 
     input_key = _detect_model_input_key(processor)
     print(f"   Model input key: {input_key}")
+
+    # Per Parakeet il processor produce spesso input_features (mel). Precomputarle e serializzarle
+    # come liste annidate è molto lento. Default: calcolo feature on-the-fly nel collator.
+    dataset_input_key = input_key
+    if input_key == "input_features" and not precompute_features:
+        dataset_input_key = "input_values"
+        print("   Feature extraction: on-the-fly (salvo solo input_values nel dataset)")
 
     vram_gb = _get_vram_gb()
     if vram_gb is not None:
@@ -326,11 +364,13 @@ def train_parakeet(
 
     def preprocess(batch):
         audio, _ = librosa.load(batch["audio_path"], sr=16000)
-        processed = processor(audio, sampling_rate=16000, return_tensors=None)
-
-        x = _extract_first_key(processed, (input_key,))
-        if hasattr(x, "tolist"):
-            x = x.tolist()
+        if dataset_input_key == "input_values":
+            x = audio.tolist()
+        else:
+            processed = processor(audio, sampling_rate=16000, return_tensors=None)
+            x = _extract_first_key(processed, (input_key,))
+            if hasattr(x, "tolist"):
+                x = x.tolist()
 
         labels = tokenizer(batch["ipa_clean"]).input_ids
 
@@ -349,7 +389,7 @@ def train_parakeet(
                 pass
 
         return {
-            input_key: x,
+            dataset_input_key: x,
             "labels": labels,
             "input_length": len(x) if hasattr(x, "__len__") else 0,
             "label_length": len(labels),
@@ -386,8 +426,8 @@ def train_parakeet(
         keep_in_memory=True,
     )
 
-    train_ds.set_format(type=None, columns=[input_key, "labels"])
-    val_ds.set_format(type=None, columns=[input_key, "labels"])
+    train_ds.set_format(type=None, columns=[dataset_input_key, "labels"])
+    val_ds.set_format(type=None, columns=[dataset_input_key, "labels"])
 
     cer_metric = evaluate.load("cer")
 
@@ -437,7 +477,16 @@ def train_parakeet(
         eval_dataset=val_ds,
         data_collator=DataCollatorCTCWithPadding(processor, input_key=input_key),
         compute_metrics=compute_metrics,
-        callbacks=[PredictionMonitorCallback(tokenizer, val_ds, input_key=input_key, print_every=100)],
+        callbacks=[
+            PredictionMonitorCallback(
+                tokenizer,
+                processor,
+                val_ds,
+                input_key=input_key,
+                dataset_input_key=dataset_input_key,
+                print_every=100,
+            )
+        ],
     )
 
     checkpoint_path = None
@@ -486,6 +535,11 @@ def main():
         default=None,
         help="Limita il numero di sample (train e val) per sanity run veloci. Esempio: --max-samples 200",
     )
+    parser.add_argument(
+        "--precompute-features",
+        action="store_true",
+        help="Precalcola e salva input_features nel dataset (più lento nel preprocessing, ma evita recompute ad ogni epoca).",
+    )
     parser.add_argument("--learning-rate", type=float, default=3e-5)
     parser.add_argument("--warmup-ratio", type=float, default=0.1)
     parser.add_argument("--gradient-accumulation-steps", type=int, default=4)
@@ -508,6 +562,7 @@ def main():
         epochs=args.epochs,
         batch_size=args.batch_size,
         max_samples=args.max_samples,
+        precompute_features=args.precompute_features,
         learning_rate=args.learning_rate,
         warmup_ratio=args.warmup_ratio,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
