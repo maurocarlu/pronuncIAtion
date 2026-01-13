@@ -24,7 +24,8 @@ Per dettagli sulle metriche, vedi **[docs/BENCHMARK_GUIDE.md](docs/BENCHMARK_GUI
 | Data2Vec2 Large | Raw Waveform | TBD | TBD | TBD | New: self-distillation SSL |
 | XLS-R 1B | Raw Waveform | TBD | TBD | TBD | New: scaling test (1B params) |
 | MMS-1B | Raw Waveform | TBD | TBD | TBD | New: massively multilingual (1B) |
-| M-CTC-T (Meta) | Mel Spectrogram | TBD | TBD | TBD | New: Meta Mel-CTC baseline (mctct-large) |
+| M-CTC-T (Meta) | Mel Spectrogram | TBD | TBD | TBD | New: Meta Mel-CTC baseline (speechbrain/m-ctc-t-large) |
+| Parakeet-CTC 1.1B | Audio 16kHz | TBD | TBD | TBD | New: FastConformer-CTC baseline (4-bit linear probing) |
 
 > **⚠️ Key Finding**: Models using **raw waveform input** (`input_values`) all work (PER < 50%). Models using **mel spectrogram** (`input_features`) all fail (PER > 80%). See [ARCHITECTURE_DETAILS.md](ARCHITECTURE_DETAILS.md#8--input-types-vs-performance---critical-analysis) for analysis.
 
@@ -71,6 +72,7 @@ Per dettagli sulle metriche, vedi **[docs/BENCHMARK_GUIDE.md](docs/BENCHMARK_GUI
 | **XLS-R 1B** | **3e-5** | 2 | 10 | Fine-tuning (CTC) | `train_xlsr_1b.py` |
 | **MMS-1B** | **3e-5** | 4 | 10 | Fine-tuning (CTC) | `train_mms_1b.py` |
 | **M-CTC-T (Meta)** | **3e-5** | 2 | 10 | Fine-tuning (CTC) | `train_mctct.py` |
+| **Parakeet-CTC 1.1B** | **3e-5** | 1 | 10 | **Linear Probe (4-bit)** | `train_parakeet.py` |
 
 ---
 
@@ -129,6 +131,7 @@ Combinazione dei due top-performer a livello logit:
 15. **M-CTC-T (Meta)** (`train_mctct.py`) - 🆕 NEW
 16. **Late Fusion HuBERT+WavLM** (`evaluate_hubert_fusion.py`) - 🆕 NEW
 17. **Early Fusion Multi-Backbone** (`train_early_fusion.py`) - 🆕 NEW
+18. **Parakeet-CTC 1.1B** (`train_parakeet.py`) - 🆕 NEW
 
 ---
 

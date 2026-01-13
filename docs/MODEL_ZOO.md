@@ -240,10 +240,10 @@ Usa adapter per lingua, ma qui lo usiamo con CTC head custom sul nostro vocab IP
 
 | Parametro | Valore |
 |-----------|--------|
-| **Checkpoint** | `facebook/mctct-large` |
+| **Checkpoint** | `speechbrain/m-ctc-t-large` |
 | **Input** | Mel Spectrogram (80 bins) |
-| **Processor** | `MctctProcessor` |
-| **Model** | `MctctForCTC` |
+| **Processor** | `MCTCTProcessor` |
+| **Model** | `MCTCTForCTC` |
 
 ### Caratteristiche
 M-CTC-T è un modello CTC di Meta progettato per lavorare su **spettrogrammi Mel** (invece che su waveform raw).
@@ -261,6 +261,29 @@ Questo esperimento serve a confrontare in modo “fair” l’efficacia di:
 
 ### Script
 Vedi `scripts/training/train_mctct.py`.
+
+---
+
+## 9c. Parakeet-CTC 1.1B (NVIDIA) ⭐ NEW
+
+| Parametro | Valore |
+|-----------|--------|
+| **Checkpoint** | `nvidia/parakeet-ctc-1.1b` |
+| **Architettura** | FastConformer-CTC |
+| **Input** | Audio 16kHz via `ParakeetProcessor` |
+| **Processor** | `ParakeetProcessor` |
+| **Model** | `ParakeetForCTC` |
+
+### Note di Implementazione
+- **Vocab custom**: `data/processed/vocab.json`
+- **Tokenizer**: `bos_token=None`, `eos_token=None`
+- **Init head**: re-init `lm_head` (std=0.02), `ignore_mismatched_sizes=True`
+- **Memoria (obbligatorio)**: carico in **4-bit** (NF4) con `BitsAndBytesConfig` + **linear probing** (solo `lm_head` trainabile)
+- **Hyperparams benchmark**: LR `3e-5`, `warmup_ratio=0.1`, `gradient_accumulation_steps=4`, `fp16=True`
+- **Monitoring**: `PredictionMonitorCallback` ogni 100 step
+
+### Script
+Vedi `scripts/training/train_parakeet.py`.
 
 ---
 
