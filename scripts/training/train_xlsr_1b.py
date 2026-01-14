@@ -7,7 +7,6 @@ Linee guida:
 - Vocab custom: data/processed/vocab.json
 - Tokenizer: bos_token=None, eos_token=None
 - Memoria: fp16=True, gradient_checkpointing=True
-- 4-bit quantization: auto se VRAM <16GB (BitsAndBytesConfig). Per training 4-bit usa QLoRA (PEFT) se disponibile.
 - Hyperparams: learning_rate=3e-5, warmup_ratio=0.1, gradient_accumulation_steps=4
 - Stabilità CTC: ctc_zero_infinity=True + re-init lm_head (fp16 mode)
 - Monitoring: PredictionMonitorCallback ogni 100 step
@@ -22,28 +21,26 @@ import sys
 import warnings
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-import importlib.util
 
 import numpy as np
 import torch
 import torch.nn as nn
 from datasets import load_dataset
-from torch.utils.data import DataLoader
 from transformers import (
-    BitsAndBytesConfig,
+    AutoFeatureExtractor,
+    AutoModelForCTC,
+    Trainer,
     TrainerCallback,
+    TrainingArguments,
     Wav2Vec2CTCTokenizer,
-    Wav2Vec2FeatureExtractor,
-    Wav2Vec2ForCTC,
     Wav2Vec2Processor,
 )
-from transformers.optimization import get_linear_schedule_with_warmup
 
 warnings.filterwarnings("ignore")
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-# PEFT (QLoRA) non richiesto: in 4-bit alleniamo solo la CTC head.
+DEFAULT_CHECKPOINT = "facebook/wav2vec2-xls-r-1b"
 
 
 def _levenshtein_distance(a: str, b: str) -> int:
@@ -84,24 +81,6 @@ def _compute_cer(predictions: List[str], references: List[str]) -> float:
             total_edits += _levenshtein_distance(ref, hyp)
             total_chars += len(ref)
         return float(total_edits / max(1, total_chars))
-
-
-def _get_vram_gb() -> Optional[float]:
-    if not torch.cuda.is_available():
-        return None
-    props = torch.cuda.get_device_properties(0)
-    return props.total_memory / (1024**3)
-
-
-def _auto_use_4bit(auto_4bit: bool, force_4bit: bool) -> bool:
-    if force_4bit:
-        return True
-    if not auto_4bit:
-        return False
-    vram_gb = _get_vram_gb()
-    if vram_gb is None:
-        return False
-    return vram_gb < 16.0
 
 
 class PredictionMonitorCallback(TrainerCallback):
@@ -177,11 +156,8 @@ def train_xlsr_1b(
     learning_rate: float = 3e-5,
     warmup_ratio: float = 0.1,
     gradient_accumulation_steps: int = 4,
-    eval_every_steps: int = 1000,
-    eval_max_batches: int = 10,
     resume: bool = False,
-    auto_4bit: bool = True,
-    use_4bit: bool = False,
+    force_download: bool = False,
 ):
     print("=" * 60)
     print("TRAINING XLS-R 1B - CTC")
@@ -196,23 +172,15 @@ def train_xlsr_1b(
         eos_token=None,
     )
 
-    feature_extractor = Wav2Vec2FeatureExtractor(
-        feature_size=1,
-        sampling_rate=16000,
-        padding_value=0.0,
-        do_normalize=True,
-        return_attention_mask=True,
+    # Allineato a train_data2vec2.py: feature extractor dal checkpoint
+    feature_extractor = AutoFeatureExtractor.from_pretrained(
+        DEFAULT_CHECKPOINT,
+        force_download=force_download,
     )
 
     processor = Wav2Vec2Processor(feature_extractor=feature_extractor, tokenizer=tokenizer)
     vocab_size = len(tokenizer)
     print(f"   Vocab size: {vocab_size}")
-
-    want_4bit = _auto_use_4bit(auto_4bit=auto_4bit, force_4bit=use_4bit)
-    vram_gb = _get_vram_gb()
-    if vram_gb is not None:
-        print(f"   GPU VRAM: {vram_gb:.1f} GB")
-    print(f"   4-bit quantization: {'ON' if want_4bit else 'OFF'}")
 
     model_kwargs: Dict[str, Any] = dict(
         vocab_size=vocab_size,
@@ -222,45 +190,15 @@ def train_xlsr_1b(
         ignore_mismatched_sizes=True,
     )
 
-    if want_4bit:
-        try:
-            import bitsandbytes  # noqa: F401
-        except Exception:
-            print("   ⚠️ bitsandbytes non disponibile: disabilito 4-bit (rischio OOM su <16GB).")
-            want_4bit = False
-
-    if want_4bit:
-        print("\n📦 Loading XLS-R 1B in 4-bit (NF4) - frozen backbone + train CTC head...")
-        bnb_config = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=torch.float16,
-        )
-        model = Wav2Vec2ForCTC.from_pretrained(
-            "facebook/wav2vec2-xls-r-1b",
-            quantization_config=bnb_config,
-            **model_kwargs,
-        )
-        for p in model.parameters():
-            p.requires_grad = False
-        # Train solo la CTC head: tienila in FP32 per evitare crash AMP ("Attempting to unscale FP16 gradients")
-        model.lm_head.requires_grad_(True)
-        model.lm_head.to(dtype=torch.float32)
-        nn.init.normal_(model.lm_head.weight, mean=0.0, std=0.02)
-        nn.init.zeros_(model.lm_head.bias)
-    else:
-        print("\n📦 Loading XLS-R 1B in fp16...")
-        model = Wav2Vec2ForCTC.from_pretrained("facebook/wav2vec2-xls-r-1b", **model_kwargs)
-        model.freeze_feature_encoder()
-        nn.init.normal_(model.lm_head.weight, mean=0.0, std=0.02)
-        nn.init.zeros_(model.lm_head.bias)
-
-        # Assicura placement corretto (GPU se disponibile) e head in FP32
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        model.to(device)
-        if torch.cuda.is_available():
-            model.half()
-            model.lm_head.to(dtype=torch.float32)
+    print("\n📦 Loading XLS-R 1B in fp16...")
+    model = AutoModelForCTC.from_pretrained(
+        DEFAULT_CHECKPOINT,
+        force_download=force_download,
+        **model_kwargs,
+    )
+    model.freeze_feature_encoder()
+    nn.init.normal_(model.lm_head.weight, mean=0.0, std=0.02)
+    nn.init.zeros_(model.lm_head.bias)
 
     try:
         model.gradient_checkpointing_enable()
@@ -358,145 +296,66 @@ def train_xlsr_1b(
     train_ds.set_format(type=None, columns=["input_values", "labels"])
     val_ds.set_format(type=None, columns=["input_values", "labels"])
 
-    # NOTE: Transformers Trainer (versioni recenti) blocca il training su modelli puramente quantizzati (4-bit).
-    # Per evitare dipendenze PEFT/LoRA e mantenere linear probing, usiamo un training loop PyTorch manuale.
-    if resume:
-        print("   ⚠️ --resume non supportato nel training loop manuale (per ora).")
+    def compute_metrics(pred):
+        pred_ids = np.argmax(pred.predictions, axis=-1)
+        pred.label_ids[pred.label_ids == -100] = processor.tokenizer.pad_token_id
+        pred_str = processor.batch_decode(pred_ids)
+        label_str = processor.batch_decode(pred.label_ids, group_tokens=False)
+        valid = [(p, l) for p, l in zip(pred_str, label_str) if l.strip()]
+        if not valid:
+            return {"cer": 1.0}
+        preds, labels = zip(*valid)
+        return {"cer": _compute_cer(predictions=list(preds), references=list(labels))}
 
-    os.makedirs(output_dir, exist_ok=True)
-
-    collator = DataCollatorCTCWithPadding(processor)
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, collate_fn=collator)
-    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, collate_fn=collator)
-
-    # Device: usa la head (trainabile) come riferimento
-    device = next(model.lm_head.parameters()).device
-
-    optimizer = torch.optim.AdamW(
-        [p for p in model.parameters() if p.requires_grad],
-        lr=learning_rate,
+    training_args = TrainingArguments(
+        output_dir=output_dir,
+        num_train_epochs=epochs,
+        per_device_train_batch_size=batch_size,
+        per_device_eval_batch_size=batch_size,
+        gradient_accumulation_steps=gradient_accumulation_steps,
+        learning_rate=learning_rate,
+        warmup_ratio=warmup_ratio,
         weight_decay=0.01,
+        logging_steps=50,
+        eval_strategy="epoch",
+        save_strategy="epoch",
+        save_total_limit=2,
+        load_best_model_at_end=True,
+        metric_for_best_model="cer",
+        greater_is_better=False,
+        fp16=True,
+        bf16=False,
+        dataloader_num_workers=0,
+        group_by_length=False,
+        gradient_checkpointing=True,
+        max_grad_norm=1.0,
+        report_to="none",
+        remove_unused_columns=False,
     )
 
-    steps_per_epoch = max(1, int(np.ceil(len(train_loader) / max(1, gradient_accumulation_steps))))
-    total_steps = epochs * steps_per_epoch
-    warmup_steps = int(total_steps * warmup_ratio)
-    scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps, num_training_steps=total_steps)
-    scaler = torch.cuda.amp.GradScaler(enabled=torch.cuda.is_available())
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        train_dataset=train_ds,
+        eval_dataset=val_ds,
+        data_collator=DataCollatorCTCWithPadding(processor),
+        compute_metrics=compute_metrics,
+        callbacks=[PredictionMonitorCallback(processor, val_ds, print_every=100)],
+    )
 
-    def _decode_batch(logits: torch.Tensor) -> List[str]:
-        pred_ids = torch.argmax(logits, dim=-1).detach().cpu().numpy()
-        return processor.batch_decode(pred_ids)
+    checkpoint = None
+    if resume:
+        checkpoints = list(Path(output_dir).glob("checkpoint-*"))
+        if checkpoints:
+            checkpoints = sorted(checkpoints, key=lambda x: int(x.name.split("-")[1]))
+            checkpoint = str(checkpoints[-1])
+            print(f"\n🔄 Resuming from: {checkpoint}")
 
-    def _eval_cer(max_batches: Optional[int] = None) -> float:
-        model.eval()
-        preds: List[str] = []
-        refs: List[str] = []
-        with torch.no_grad():
-            for i, batch in enumerate(val_loader):
-                batch = {k: (v.to(device) if isinstance(v, torch.Tensor) else v) for k, v in batch.items()}
-                with torch.cuda.amp.autocast(enabled=torch.cuda.is_available(), dtype=torch.float16):
-                    out = model(**batch)
-                    logits = out.logits
-
-                pred_str = _decode_batch(logits)
-                label_ids = batch["labels"].detach().cpu().numpy()
-                label_ids[label_ids == -100] = processor.tokenizer.pad_token_id
-                label_str = processor.batch_decode(label_ids, group_tokens=False)
-
-                for p, r in zip(pred_str, label_str):
-                    if r.strip():
-                        preds.append(p)
-                        refs.append(r)
-
-                if max_batches is not None and (i + 1) >= max_batches:
-                    break
-
-        if not refs:
-            return 1.0
-        return _compute_cer(predictions=preds, references=refs)
-
-    def _print_sample(step: int) -> None:
-        try:
-            model.eval()
-            sample = val_ds[0]
-            x = torch.tensor([sample["input_values"]], device=device)
-            with torch.no_grad():
-                with torch.cuda.amp.autocast(enabled=torch.cuda.is_available(), dtype=torch.float16):
-                    logits = model(input_values=x).logits
-            pred = processor.decode(torch.argmax(logits, dim=-1)[0])
-            target_ids = [i for i in sample["labels"] if i != -100]
-            target = processor.decode(target_ids)
-            print(f"\n📊 [Step {step}] Sample Prediction:")
-            print(f"   Target: {target[:80]}{'...' if len(target) > 80 else ''}")
-            print(f"   Pred:   {pred[:80]}{'...' if len(pred) > 80 else ''}")
-        except Exception as e:
-            print(f"\n⚠️ Prediction monitor error: {e}")
-        finally:
-            model.train()
-
-    print("\n🚀 Starting training (manual loop)...")
-    if eval_every_steps and eval_every_steps > 0:
-        print(
-            f"   ℹ️ CER durante training: ogni {eval_every_steps} step (val batches={eval_max_batches}). "
-            "CER completo a fine epoca."
-        )
-    else:
-        print("   ℹ️ CER calcolato solo a fine epoca (usa --eval-every-steps per metriche durante training).")
-    model.train()
-    global_step = 0
-    best_cer = None
-
-    for epoch in range(1, epochs + 1):
-        running_loss = 0.0
-        optimizer.zero_grad(set_to_none=True)
-
-        for step_idx, batch in enumerate(train_loader, start=1):
-            batch = {k: (v.to(device) if isinstance(v, torch.Tensor) else v) for k, v in batch.items()}
-            with torch.cuda.amp.autocast(enabled=torch.cuda.is_available(), dtype=torch.float16):
-                out = model(**batch)
-                loss = out.loss
-
-            loss_to_backprop = loss / max(1, gradient_accumulation_steps)
-            scaler.scale(loss_to_backprop).backward()
-            running_loss += float(loss.detach().cpu())
-
-            if step_idx % gradient_accumulation_steps == 0:
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.lm_head.parameters(), 1.0)
-                scaler.step(optimizer)
-                scaler.update()
-                optimizer.zero_grad(set_to_none=True)
-                scheduler.step()
-
-                global_step += 1
-
-                if global_step % 50 == 0:
-                    avg_loss = running_loss / max(1, 50 * gradient_accumulation_steps)
-                    running_loss = 0.0
-                    print(f"[Epoch {epoch}/{epochs}] step={global_step}/{total_steps} loss={avg_loss:.4f}")
-
-                if global_step % 100 == 0:
-                    _print_sample(global_step)
-
-                if eval_every_steps and eval_every_steps > 0 and global_step % eval_every_steps == 0:
-                    cer_mid = _eval_cer(max_batches=eval_max_batches)
-                    print(f"\n📈 [Step {global_step}] CER(val, ~subset): {cer_mid:.4f}")
-
-        cer = _eval_cer(max_batches=None)
-        print(f"\n✅ Epoch {epoch} CER: {cer:.4f}")
-
-        if best_cer is None or cer < best_cer:
-            best_cer = cer
-            best_dir = Path(output_dir) / "best_model"
-            best_dir.mkdir(parents=True, exist_ok=True)
-            model.save_pretrained(str(best_dir))
-            processor.save_pretrained(str(best_dir))
-            print(f"✓ Best model saved: {best_dir}")
+    print("\n🚀 Starting training...")
+    trainer.train(resume_from_checkpoint=checkpoint)
 
     final_path = Path(output_dir) / "final_model"
-    final_path.mkdir(parents=True, exist_ok=True)
-    model.save_pretrained(str(final_path))
+    trainer.save_model(str(final_path))
     processor.save_pretrained(str(final_path))
     print(f"\n✓ Model saved: {final_path}")
 
@@ -518,22 +377,12 @@ def main():
     parser.add_argument("--learning-rate", type=float, default=3e-5)
     parser.add_argument("--warmup-ratio", type=float, default=0.1)
     parser.add_argument("--gradient-accumulation-steps", type=int, default=4)
-    parser.add_argument(
-        "--eval-every-steps",
-        type=int,
-        default=1000,
-        help="Ogni quanti step calcolare una CER veloce sul validation set (0 = disabilita).",
-    )
-    parser.add_argument(
-        "--eval-max-batches",
-        type=int,
-        default=10,
-        help="Numero di batch di validation usati per la CER veloce (solo per --eval-every-steps).",
-    )
     parser.add_argument("--resume", action="store_true")
-    parser.add_argument("--auto-4bit", dest="auto_4bit", action="store_true", default=True)
-    parser.add_argument("--no-auto-4bit", dest="auto_4bit", action="store_false", help="Disable auto 4-bit")
-    parser.add_argument("--use-4bit", action="store_true", help="Force 4-bit (overrides auto)")
+    parser.add_argument(
+        "--force-download",
+        action="store_true",
+        help="Force re-download del checkpoint HF (utile se cache corrotta su Kaggle).",
+    )
 
     args = parser.parse_args()
 
@@ -548,11 +397,8 @@ def main():
         learning_rate=args.learning_rate,
         warmup_ratio=args.warmup_ratio,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
-        eval_every_steps=args.eval_every_steps,
-        eval_max_batches=args.eval_max_batches,
         resume=args.resume,
-        auto_4bit=args.auto_4bit,
-        use_4bit=args.use_4bit,
+        force_download=args.force_download,
     )
 
 
