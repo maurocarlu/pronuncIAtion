@@ -25,7 +25,6 @@ import warnings
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-import evaluate
 import numpy as np
 import torch
 import torch.nn as nn
@@ -45,6 +44,50 @@ warnings.filterwarnings("ignore")
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 DEFAULT_CHECKPOINT = "nvidia/parakeet-ctc-1.1b"
+
+
+def _levenshtein_distance(a: str, b: str) -> int:
+    # DP iterativa O(len(a)*len(b)) ma con memoria O(min(len(a),len(b))).
+    if a == b:
+        return 0
+    if len(a) == 0:
+        return len(b)
+    if len(b) == 0:
+        return len(a)
+    if len(a) < len(b):
+        a, b = b, a
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, start=1):
+        cur = [i]
+        for j, cb in enumerate(b, start=1):
+            ins = cur[j - 1] + 1
+            dele = prev[j] + 1
+            sub = prev[j - 1] + (0 if ca == cb else 1)
+            cur.append(min(ins, dele, sub))
+        prev = cur
+    return prev[-1]
+
+
+def _compute_cer(predictions: List[str], references: List[str]) -> float:
+    """CER locale per evitare download/lock di evaluate su Kaggle."""
+    try:
+        import jiwer
+
+        # jiwer.cer calcola (edit distance / chars) su aggregato
+        return float(jiwer.cer(references, predictions))
+    except Exception:
+        total_edits = 0
+        total_chars = 0
+        for ref, hyp in zip(references, predictions):
+            if ref is None:
+                continue
+            ref = str(ref)
+            hyp = "" if hyp is None else str(hyp)
+            if len(ref) == 0:
+                continue
+            total_edits += _levenshtein_distance(ref, hyp)
+            total_chars += len(ref)
+        return float(total_edits / max(1, total_chars))
 
 
 def _resolve_hf_token(hf_token: Optional[str]) -> Optional[str]:
@@ -434,8 +477,6 @@ def train_parakeet(
     train_ds.set_format(type=None, columns=[dataset_input_key, "labels"])
     val_ds.set_format(type=None, columns=[dataset_input_key, "labels"])
 
-    cer_metric = evaluate.load("cer")
-
     def compute_metrics(pred):
         pred_ids = np.argmax(pred.predictions, axis=-1)
         pred.label_ids[pred.label_ids == -100] = tokenizer.pad_token_id
@@ -500,7 +541,7 @@ def train_parakeet(
 
         if not refs:
             return 1.0
-        return float(cer_metric.compute(predictions=preds, references=refs))
+        return _compute_cer(predictions=preds, references=refs)
 
     def _print_sample(step: int) -> None:
         try:
