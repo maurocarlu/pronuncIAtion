@@ -10,6 +10,7 @@ Linee guida:
 - Hyperparams: learning_rate=3e-5, warmup_ratio=0.1, gradient_accumulation_steps=4
 - Stabilità CTC: ctc_zero_infinity=True + re-init lm_head
 - Monitoring: PredictionMonitorCallback ogni 100 step
+- Validazione/checkpoint: a fine epoca (CER locale)
 
 Uso:
     python scripts/training/train_data2vec2.py --epochs 10 --output-dir outputs/data2vec2_large
@@ -22,7 +23,6 @@ import warnings
 from pathlib import Path
 from typing import Any, Dict, List
 
-import evaluate
 import numpy as np
 import torch
 import torch.nn as nn
@@ -40,6 +40,50 @@ from transformers import (
 warnings.filterwarnings("ignore")
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+
+
+def _levenshtein_distance(a: str, b: str) -> int:
+    if a == b:
+        return 0
+    if not a:
+        return len(b)
+    if not b:
+        return len(a)
+
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, start=1):
+        cur = [i]
+        for j, cb in enumerate(b, start=1):
+            ins = cur[j - 1] + 1
+            del_ = prev[j] + 1
+            sub = prev[j - 1] + (0 if ca == cb else 1)
+            cur.append(min(ins, del_, sub))
+        prev = cur
+    return prev[-1]
+
+
+def _compute_cer(predictions: List[str], references: List[str]) -> float:
+    """Character Error Rate (CER). Usa jiwer se disponibile, altrimenti Levenshtein."""
+    try:
+        import jiwer
+
+        return float(jiwer.cer(references, predictions))
+    except Exception:
+        pass
+
+    if not references:
+        return 1.0
+    if len(predictions) != len(references):
+        n = min(len(predictions), len(references))
+        predictions = predictions[:n]
+        references = references[:n]
+
+    edits = 0
+    chars = 0
+    for p, r in zip(predictions, references):
+        edits += _levenshtein_distance(r, p)
+        chars += len(r)
+    return float(edits) / float(max(1, chars))
 
 
 class PredictionMonitorCallback(TrainerCallback):
@@ -258,8 +302,6 @@ def train_data2vec2(
     train_ds.set_format(type=None, columns=["input_values", "labels"])
     val_ds.set_format(type=None, columns=["input_values", "labels"])
 
-    cer_metric = evaluate.load("cer")
-
     def compute_metrics(pred):
         pred_ids = np.argmax(pred.predictions, axis=-1)
         pred.label_ids[pred.label_ids == -100] = processor.tokenizer.pad_token_id
@@ -269,7 +311,7 @@ def train_data2vec2(
         if not valid:
             return {"cer": 1.0}
         preds, labels = zip(*valid)
-        return {"cer": cer_metric.compute(predictions=preds, references=labels)}
+        return {"cer": _compute_cer(predictions=list(preds), references=list(labels))}
 
     training_args = TrainingArguments(
         output_dir=output_dir,
@@ -281,10 +323,8 @@ def train_data2vec2(
         warmup_ratio=warmup_ratio,
         weight_decay=0.01,
         logging_steps=50,
-        eval_strategy="steps",
-        eval_steps=500,
-        save_strategy="steps",
-        save_steps=500,
+        eval_strategy="epoch",
+        save_strategy="epoch",
         save_total_limit=2,
         load_best_model_at_end=True,
         metric_for_best_model="cer",
