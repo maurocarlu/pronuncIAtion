@@ -377,10 +377,10 @@ Ogni modello nel benchmark usa una CTC (Connectionist Temporal Classification) h
 
 | Modello | Input alla Head | Architettura CTC Head | Params Head | Motivazione |
 |---------|-----------------|----------------------|-------------|-------------|
-| **W2V-BERT 2.0** | Vettori 1024D (da log-mel) | `Linear(1024 → 43)` | ~44K | Encoder già contestualizzato |
-| **MMS 1B** | Vettori 1024D | `Linear(1024 → 43)` | ~44K | Identico a W2V-BERT |
-| **Whisper** | Vettori 768D | `Dropout(0.1) → Linear(768 → 43)` | ~33K | Regularizzazione aggiuntiva |
-| **Qwen2-Audio** | Vettori 1280D | `Linear(1280→512) → GELU → Dropout(0.1) → Linear(512→43)` | ~680K | MLP più espressivo per linear probe |
+| **W2V-BERT 2.0** | Vettori 1024D (da log-mel) | `Linear(1024 → vocab)` | ~44K | Encoder già contestualizzato |
+| **MMS 1B** | Vettori 1024D | `Linear(1024 → vocab)` | ~44K | Identico a W2V-BERT |
+| **Whisper** | Vettori 768D | `Dropout(0.1) → Linear(768 → vocab)` | ~33K | Regularizzazione aggiuntiva |
+| **Qwen2-Audio** | Vettori 1280D | `Linear(1280→512) → GELU → Dropout(0.1) → Linear(512→vocab)` | ~680K | MLP più espressivo per linear probe |
 | **SpeechTokenizer** | Indici discreti 0-1023 | `Embedding → Transformer(2L) → Linear` | ~1.4M | Token discreti richiedono contestualizzazione |
 
 ### 🔬 Dettagli Implementativi
@@ -493,9 +493,11 @@ All models in this benchmark fall into **two categories** based on their input r
 | **HuBERT Large** | Raw Waveform | `input_values` | 16kHz | 320 (audio samples) |
 | **Wav2Vec2 / XLS-R** | Raw Waveform | `input_values` | 16kHz | 320 (audio samples) |
 | **MMS 1B** | Raw Waveform | `input_values` | 16kHz | 320 (audio samples) |
+| **Parakeet-CTC 1.1B** | Raw Waveform (via processor) | `input_values` | 16kHz | Model-dependent |
 | **Wav2Vec2-BERT 2.0** | Mel Spectrogram | `input_features` | 16kHz | 2 (spectrogram frames) |
 | **Whisper Encoder** | Mel Spectrogram | `input_features` | 16kHz | 2 (encoder downsampling) |
 | **Qwen2-Audio** | Mel Spectrogram | `input_features` | 16kHz | Variable |
+| **M-CTC-T (Meta)** | Mel Spectrogram | `input_features` | 16kHz | Model-dependent |
 
 ### ⚡ Preprocessing Code Comparison
 
@@ -554,26 +556,27 @@ inputs = feature_extractor(audio_array, sampling_rate=16000, return_tensors="pt"
 ### 🔍 Key Observations
 
 #### ✅ Models that WORK (PER < 50%)
-All successful models share these characteristics:
-1. **Raw waveform input** (`input_values`)
-2. **Pre-trained with ASR-compatible objectives** (contrastive learning, masked prediction)
-3. **Built-in CTC head from HuggingFace** (`HubertForCTC`, `WavLMForCTC`, `Wav2Vec2ForCTC`)
+Nel benchmark corrente, i modelli che hanno funzionato condividono tipicamente:
+1. **Pre-training compatibile con CTC** (frame-level / ASR-ready)
+2. **Preprocessing corretto** (feature extractor giusto + shape corretta)
+3. **CTC head consistente** (blank/padding/labels gestiti correttamente)
 
 #### ❌ Models that FAIL (PER > 80%)
-Failed models share:
-1. **Mel spectrogram input** (`input_features`)
-2. **Different pre-training paradigm** (seq2seq for Whisper, MLM+contrastive for W2V-BERT)
-3. **Custom or misaligned CTC heads**
+I fallimenti osservati finora sono stati associati soprattutto a:
+1. **Mismatch architetturale** (es. Whisper Encoder usato come CTC puro)
+2. **Feature extractor / shape sbagliati** (il modello gira ma predice garbage)
+3. **Problemi CTC classici** (blank collapse, label-length >= frames)
 
 ### 🧪 Root Cause Analysis
 
-#### Why Mel Spectrogram Models Fail
+#### When Mel Spectrogram Models Fail (and when they can work)
 
-1. **Pre-training Mismatch**
+1. **Pre-training / Objective Mismatch**
    - Raw waveform models (Wav2Vec2, HuBERT, WavLM) are pre-trained with **frame-level contrastive objectives**
    - Their encoders produce representations optimized for **temporal alignment** with CTC
    - Whisper is pre-trained for **seq2seq generation** (encoder→decoder)
-   - W2V-BERT combines **MLM + contrastive** but its representations may not align well with CTC's monotonic alignment assumption
+    - W2V-BERT combines **MLM + contrastive** and può richiedere setup più delicato
+    - Modelli come **M-CTC-T** sono invece progettati esplicitamente per CTC su feature 2D (mel)
 
 2. **Subsampling Factor Complexity**
    - Raw waveform models: Fixed 320x subsampling → 1 frame per 20ms
@@ -654,7 +657,7 @@ class WhisperEncoderForCTC(nn.Module):
 1. **Use raw waveform models** (WavLM, HuBERT, Wav2Vec2) - they are designed for frame-level tasks
 2. **Use HuggingFace's built-in CTC classes** (`*ForCTC`) - they handle blank tokens, padding, and loss correctly
 3. **Always reinitialize `lm_head`** with small weights (std=0.02) to prevent CTC collapse
-4. **Avoid mel spectrogram models** for CTC unless you have specific domain knowledge
+4. **Non generalizzare “mel = fail”**: evitare modelli mel-based *non pensati per CTC* (es. Whisper encoder-only). Modelli CTC nativi su mel (es. M-CTC-T) sono candidati validi se il preprocessing è corretto
 5. **Monitor training carefully** - loss around 6-7 after multiple epochs indicates failed learning
 
 ### For Future Experiments:
@@ -662,6 +665,24 @@ class WhisperEncoderForCTC(nn.Module):
 - **Whisper** could work with a **seq2seq approach** (using decoder) instead of CTC
 - **W2V-BERT** might need different preprocessing or learning rate schedules
 - **Qwen2-Audio** is promising for linear probing but requires more training time
+
+---
+
+## 11b. 🧠 Training 1B Models: Anti-OOM + QLoRA (Practical Notes)
+
+Per i modelli ~1B (XLS-R 1B, MMS-1B) il collo di bottiglia è quasi sempre la VRAM (specialmente su T4 16GB).
+
+### Anti-OOM (prima scelta)
+- Limitare la durata audio: `--max-audio-seconds` (truncate/drop)
+- Abilitare bucketing: `group_by_length=True` + `length_column_name` (riduce padding)
+- Separare batch di eval: `--eval-batch-size` più piccolo
+- Abilitare `gradient_checkpointing=True` e `fp16=True`
+
+### QLoRA (fallback quando FP16 non basta)
+Se anche con anti-OOM il modello va in OOM, usare:
+- `--load-in-4bit` (o `--load-in-8bit`) + LoRA via PEFT
+
+Nota: QLoRA ≠ full fine-tuning del backbone; è un adattamento a basso rank dei layer target per rientrare nei vincoli hardware.
 
 ---
 

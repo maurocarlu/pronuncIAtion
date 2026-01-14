@@ -36,6 +36,53 @@ Giustifica l'uso di un modello diverso per catturare accenti non nativi (L2 spea
 
 ---
 
+## Data2Vec 2.0
+
+Paper che introduce l'obiettivo di self-distillation per SSL su audio (e altre modalità).
+
+> **data2vec: A General Framework for Self-supervised Learning in Speech, Vision and Language**
+>
+> *Alexei Baevski, Wei-Ning Hsu, Qiantong Xu, Arun Babu, Jiatao Gu, Michael Auli*
+>
+> **ICML 2022**
+>
+> [arXiv:2202.03555](https://arxiv.org/abs/2202.03555)
+
+---
+
+## MMS (Massively Multilingual Speech)
+
+Risorsa di riferimento per il pre-training multilingua su 1000+ lingue (1B params) e il rilascio dei checkpoint MMS.
+
+> **Scaling Speech Technology to 1,000+ Languages**
+>
+> *Meta AI*
+>
+> [Blog/Release](https://ai.facebook.com/blog/massively-multilingual-speech/)
+
+---
+
+## Whisper
+
+Paper che descrive Whisper e il training su larga scala.
+
+> **Robust Speech Recognition via Large-Scale Weak Supervision**
+>
+> *Alec Radford et al.*
+>
+> [arXiv:2212.04356](https://arxiv.org/abs/2212.04356)
+
+---
+
+## M-CTC-T / Parakeet-CTC (Model Cards)
+
+Per i modelli CTC specifici usati nel benchmark, i dettagli più aggiornati (architettura, input, processor) sono nelle rispettive model card:
+
+- `speechbrain/m-ctc-t-large`: https://huggingface.co/speechbrain/m-ctc-t-large
+- `nvidia/parakeet-ctc-1.1b`: https://huggingface.co/nvidia/parakeet-ctc-1.1b
+
+---
+
 ## SUPERB Benchmark (Weighted Layers)
 
 L'idea di sommare pesatamente i layer per task diversi. Dimostra che ogni layer di un modello speech contiene informazioni diverse:

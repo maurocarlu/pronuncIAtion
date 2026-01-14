@@ -167,6 +167,12 @@ class PredictionMonitorCallback(TrainerCallback):
             pred_ids = torch.argmax(logits, dim=-1)[0]
             pred_str = self.tokenizer.decode(pred_ids)
 
+            try:
+                blank_id = int(self.tokenizer.pad_token_id)
+                blank_ratio = float((pred_ids == blank_id).float().mean().item())
+            except Exception:
+                blank_ratio = None
+
             label_ids = [i for i in sample["labels"] if i != -100]
             label_str = self.tokenizer.decode(label_ids)
 
@@ -175,6 +181,8 @@ class PredictionMonitorCallback(TrainerCallback):
             print(f"   Pred:   {pred_str[:80]}{'...' if len(pred_str) > 80 else ''}")
             if len(pred_str.strip()) == 0:
                 print("   ⚠️ WARNING: Empty prediction - possible blank collapse!")
+            if blank_ratio is not None:
+                print(f"   Blank ratio: {blank_ratio:.3f}")
         except Exception as e:
             print(f"\n⚠️ Prediction monitor error: {e}")
         finally:
@@ -216,6 +224,7 @@ def train_mctct(
     learning_rate: float = 3e-5,
     warmup_ratio: float = 0.1,
     gradient_accumulation_steps: int = 4,
+    group_by_length: bool = True,
     resume: bool = False,
     force_download: bool = False,
 ):
@@ -317,17 +326,32 @@ def train_mctct(
 
     import librosa
 
+    feature_size = None
+    try:
+        feature_size = getattr(processor.feature_extractor, "feature_size", None)
+        if feature_size is None:
+            feature_size = getattr(processor.feature_extractor, "n_mels", None)
+    except Exception:
+        feature_size = None
+
     def preprocess(batch):
         audio, _ = librosa.load(batch["audio_path"], sr=16000)
-        processed = processor(audio, sampling_rate=16000, return_tensors=None)
+        # return_tensors="np" aiuta a mantenere shape consistente tra versioni di transformers
+        processed = processor(audio, sampling_rate=16000, return_tensors="np")
         feats = _extract_input_features(processed)
 
-        # Typical shape: [T, 80] or [80, T] depending on extractor; keep as-is and let pad handle
-        feats = np.array(feats, dtype=np.float32)
+        # Normalizza orientamento: preferiamo [feature_size, time] (stile Whisper/feature_extractor.pad)
+        feats = np.asarray(feats, dtype=np.float32)
+        if feats.ndim == 3 and feats.shape[0] == 1:
+            feats = feats[0]
+        if feats.ndim == 2 and feature_size is not None:
+            if feats.shape[0] != feature_size and feats.shape[1] == feature_size:
+                feats = feats.T
         feats = feats.tolist()
 
         labels = tokenizer(batch["ipa_clean"]).input_ids
-        return {"input_features": feats, "labels": labels}
+        input_length = int(len(feats[0])) if isinstance(feats, list) and feats and isinstance(feats[0], list) else 0
+        return {"input_features": feats, "labels": labels, "input_length": input_length}
 
     cols = [c for c in train_ds.column_names if c not in ["audio_path", "ipa_clean"]]
     train_ds = train_ds.remove_columns(cols)
@@ -349,8 +373,11 @@ def train_mctct(
         keep_in_memory=True,
     )
 
-    train_ds.set_format(type=None, columns=["input_features", "labels"])
-    val_ds.set_format(type=None, columns=["input_features", "labels"])
+    train_ds = train_ds.filter(lambda x: x.get("input_length", 0) > 0, load_from_cache_file=False)
+    val_ds = val_ds.filter(lambda x: x.get("input_length", 0) > 0, load_from_cache_file=False)
+
+    train_ds.set_format(type=None, columns=["input_features", "labels", "input_length"])
+    val_ds.set_format(type=None, columns=["input_features", "labels", "input_length"])
 
     def compute_metrics(pred):
         pred_ids = np.argmax(pred.predictions, axis=-1)
@@ -382,7 +409,8 @@ def train_mctct(
         fp16=True,
         bf16=False,
         dataloader_num_workers=0,
-        group_by_length=False,
+        group_by_length=group_by_length,
+        length_column_name="input_length",
         gradient_checkpointing=True,
         max_grad_norm=1.0,
         report_to="none",
@@ -442,6 +470,12 @@ def main():
     parser.add_argument("--learning-rate", type=float, default=3e-5)
     parser.add_argument("--warmup-ratio", type=float, default=0.1)
     parser.add_argument("--gradient-accumulation-steps", type=int, default=4)
+
+    parser.add_argument(
+        "--no-group-by-length",
+        action="store_true",
+        help="Disabilita bucketing per lunghezza (può aumentare padding e peggiorare memoria/stabilità).",
+    )
     parser.add_argument("--resume", action="store_true")
     parser.add_argument(
         "--force-download",
@@ -463,6 +497,7 @@ def main():
         learning_rate=args.learning_rate,
         warmup_ratio=args.warmup_ratio,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
+        group_by_length=(not args.no_group_by_length),
         resume=args.resume,
         force_download=args.force_download,
     )

@@ -32,6 +32,8 @@ Il benchmark valuta i modelli su **3 Task Complementari** per misurare diverse s
 
 $$ PER = \frac{Inserzioni + Cancellazioni + Sostituzioni}{Numero Totale Fonemi} $$
 
+> **Nota pratica**: nel codice alcune metriche sono calcolate come **CER su stringhe IPA** (edit distance su caratteri). Se l'IPA è tokenizzato 1-a-1 (un simbolo = un token), CER ≈ PER.
+
 ### TASK B: Human Score Correlation
 *Il modello "soffre" sugli stessi errori che gli umani giudicano negativamente?*
 
@@ -60,6 +62,15 @@ Lo script `evaluate_speechocean.py` rileva automaticamente il tipo di modello (W
 
 ```bash
 python scripts/evaluation/evaluate_speechocean.py --model-path outputs/wavlm_weighted
+```
+
+Esempi (nuove architetture):
+
+```bash
+python scripts/evaluation/evaluate_speechocean.py --model-path outputs/xlsr_1b
+python scripts/evaluation/evaluate_speechocean.py --model-path outputs/mms_1b
+python scripts/evaluation/evaluate_speechocean.py --model-path outputs/mctct
+python scripts/evaluation/evaluate_speechocean.py --model-path outputs/parakeet_ctc
 ```
 
 ### Valutazione Ensemble
@@ -116,3 +127,11 @@ tokenizer = Wav2Vec2CTCTokenizer(
 ```python
 ds = ds.filter(lambda x: x["label_length"] < x["input_length"] // 320)
 ```
+
+### OOM su GPU 16GB (XLS-R 1B / MMS-1B)
+
+Se vai in OOM durante training/eval (tipico su T4 16GB):
+- Riduci la durata massima: `--max-audio-seconds` (truncate/drop)
+- Usa bucketing per lunghezza: `group_by_length=True` (+ `length_column_name`)
+- Separa batch di eval: `--eval-batch-size 1`
+- Fallback: QLoRA con `--load-in-4bit` (richiede `bitsandbytes` + `peft`)

@@ -196,12 +196,18 @@ class PredictionMonitorCallback(TrainerCallback):
                     padding=True,
                     return_tensors="pt",
                 )
-                x = feats["input_features"].to(device=device, dtype=torch.float16)
+                # In questo script la CTC head è forzata in fp32; usare input fp32 evita mismatch input(fp16)/bias(fp32).
+                x = feats["input_features"].to(device=device, dtype=torch.float32)
             else:
                 x = torch.tensor([sample[self.dataset_input_key]], device=device)
 
             with torch.no_grad():
-                out = model(**{self.input_key: x})
+                # Evita autocast ereditato dal loop di training quando fp16 è attivo.
+                if torch.cuda.is_available():
+                    with torch.cuda.amp.autocast(enabled=False):
+                        out = model(**{self.input_key: x})
+                else:
+                    out = model(**{self.input_key: x})
                 logits = out.logits if hasattr(out, "logits") else out["logits"]
 
             pred_ids = torch.argmax(logits, dim=-1)[0]
@@ -239,9 +245,7 @@ class DataCollatorCTCWithPadding:
                 padding=self.padding,
                 return_tensors="pt",
             )
-            # Parakeet (subsampling conv) spesso è in fp16 quando caricato in 4-bit; evita mismatch input(float32)/bias(float16)
-            if "input_features" in batch:
-                batch["input_features"] = batch["input_features"].to(dtype=torch.float16)
+            # Manteniamo fp32: la CTC head è fp32 (e fp16 può causare mismatch input/bias nel logging).
         else:
             input_features = [{self.input_key: f[self.input_key]} for f in features]
             batch = self.processor.feature_extractor.pad(

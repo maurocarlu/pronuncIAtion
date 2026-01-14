@@ -160,6 +160,11 @@ def train_xlsr_1b(
     max_audio_seconds: Optional[float] = 12.0,
     truncate_audio: bool = True,
     group_by_length: bool = True,
+    load_in_8bit: bool = False,
+    load_in_4bit: bool = False,
+    lora_r: int = 16,
+    lora_alpha: int = 32,
+    lora_dropout: float = 0.05,
     resume: bool = False,
     force_download: bool = False,
 ):
@@ -194,15 +199,87 @@ def train_xlsr_1b(
         ignore_mismatched_sizes=True,
     )
 
-    print("\n📦 Loading XLS-R 1B in fp16...")
-    model = AutoModelForCTC.from_pretrained(
-        DEFAULT_CHECKPOINT,
-        force_download=force_download,
-        **model_kwargs,
-    )
+    if load_in_4bit and load_in_8bit:
+        raise ValueError("Scegli una sola modalità: --load-in-4bit oppure --load-in-8bit")
+
+    quantization_config = None
+    use_qlora = bool(load_in_4bit or load_in_8bit)
+    if use_qlora:
+        try:
+            from transformers import BitsAndBytesConfig
+        except Exception as e:
+            raise RuntimeError(
+                "Quantizzazione richiesta ma Transformers non espone BitsAndBytesConfig. "
+                "Su Kaggle installa/aggiorna transformers e bitsandbytes."
+            ) from e
+
+        compute_dtype = torch.float16
+        if load_in_4bit:
+            quantization_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_compute_dtype=compute_dtype,
+                bnb_4bit_use_double_quant=True,
+                bnb_4bit_quant_type="nf4",
+            )
+        else:
+            quantization_config = BitsAndBytesConfig(load_in_8bit=True)
+
+        print(
+            "\n📦 Loading XLS-R 1B with quantization "
+            + ("(4-bit NF4, QLoRA)" if load_in_4bit else "(8-bit, QLoRA)")
+            + "..."
+        )
+        model = AutoModelForCTC.from_pretrained(
+            DEFAULT_CHECKPOINT,
+            force_download=force_download,
+            quantization_config=quantization_config,
+            device_map="auto",
+            **model_kwargs,
+        )
+    else:
+        print("\n📦 Loading XLS-R 1B in fp16...")
+        model = AutoModelForCTC.from_pretrained(
+            DEFAULT_CHECKPOINT,
+            force_download=force_download,
+            **model_kwargs,
+        )
+
+    try:
+        model.config.use_cache = False
+    except Exception:
+        pass
+
     model.freeze_feature_encoder()
-    nn.init.normal_(model.lm_head.weight, mean=0.0, std=0.02)
-    nn.init.zeros_(model.lm_head.bias)
+    try:
+        nn.init.normal_(model.lm_head.weight, mean=0.0, std=0.02)
+        nn.init.zeros_(model.lm_head.bias)
+    except Exception:
+        pass
+
+    if use_qlora:
+        try:
+            from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+        except Exception as e:
+            raise RuntimeError(
+                "Quantizzazione attiva: serve anche peft per fare QLoRA. "
+                "Su Kaggle: pip install -q peft bitsandbytes"
+            ) from e
+
+        model = prepare_model_for_kbit_training(model)
+        lora_config = LoraConfig(
+            r=lora_r,
+            lora_alpha=lora_alpha,
+            lora_dropout=lora_dropout,
+            bias="none",
+            target_modules=["q_proj", "k_proj", "v_proj", "out_proj"],
+            task_type="CTC",
+            modules_to_save=["lm_head"],
+        )
+        model = get_peft_model(model, lora_config)
+        try:
+            model.print_trainable_parameters()
+        except Exception:
+            pass
 
     try:
         model.gradient_checkpointing_enable()
@@ -422,6 +499,19 @@ def main():
         action="store_true",
         help="Disabilita bucketing per lunghezza (può aumentare padding e memoria).",
     )
+    parser.add_argument(
+        "--load-in-8bit",
+        action="store_true",
+        help="Carica il modello quantizzato 8-bit (richiede bitsandbytes). Per training usa QLoRA.",
+    )
+    parser.add_argument(
+        "--load-in-4bit",
+        action="store_true",
+        help="Carica il modello quantizzato 4-bit NF4 (richiede bitsandbytes). Per training usa QLoRA.",
+    )
+    parser.add_argument("--lora-r", type=int, default=16)
+    parser.add_argument("--lora-alpha", type=int, default=32)
+    parser.add_argument("--lora-dropout", type=float, default=0.05)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument(
         "--force-download",
@@ -450,6 +540,11 @@ def main():
         max_audio_seconds=max_audio_seconds,
         truncate_audio=(not args.no_truncate_audio),
         group_by_length=(not args.no_group_by_length),
+        load_in_8bit=args.load_in_8bit,
+        load_in_4bit=args.load_in_4bit,
+        lora_r=args.lora_r,
+        lora_alpha=args.lora_alpha,
+        lora_dropout=args.lora_dropout,
         resume=args.resume,
         force_download=args.force_download,
     )

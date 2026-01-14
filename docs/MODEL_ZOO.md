@@ -66,7 +66,9 @@ Versione “scaled” di XLS-R per testare l’ipotesi: più capacità → migli
 - **Vocab custom**: `data/processed/vocab.json`
 - **Tokenizer**: `bos_token=None`, `eos_token=None`
 - **Stabilità CTC**: `ctc_zero_infinity=True` + re-init `lm_head`
-- **Memoria**: `fp16=True`, `gradient_checkpointing=True`, **auto 4-bit** se VRAM < 16GB
+- **Memoria**: `fp16=True`, `gradient_checkpointing=True`
+- **Anti-OOM (1B)**: usare `--max-audio-seconds` (truncate/drop), `--eval-batch-size` separato e `group_by_length=True` (bucketing) per ridurre il peak VRAM
+- **Fallback VRAM (QLoRA)**: `--load-in-4bit` o `--load-in-8bit` + LoRA (richiede `bitsandbytes` + `peft`)
 - **Monitoring**: `PredictionMonitorCallback` ogni 100 step
 
 ### Script
@@ -224,9 +226,10 @@ MMS è un modello massiccio (1 miliardo di parametri) addestrato su oltre 1000 l
 Usa adapter per lingua, ma qui lo usiamo con CTC head custom sul nostro vocab IPA.
 
 ### Configurazione
-- **FP16**: Obbligatorio per VRAM
-- **4-bit quantization**: Opzionale per GPU con <16GB VRAM
-- **Batch Size**: 8 (con FP16)
+- **FP16**: consigliato/necessario per VRAM
+- **Anti-OOM (1B)**: `--max-audio-seconds`, `--eval-batch-size`, bucketing `group_by_length=True`
+- **Fallback VRAM (QLoRA)**: `--load-in-4bit` o `--load-in-8bit` + LoRA (richiede `bitsandbytes` + `peft`)
+- **Batch Size**: tipicamente 1 su 16GB VRAM (aumentare con `--gradient-accumulation-steps`)
 
 **Motivazione**: Testare se il pre-training multilingue massivo migliora il riconoscimento fonetico.
 
@@ -256,7 +259,8 @@ Questo esperimento serve a confrontare in modo “fair” l’efficacia di:
 - **Tokenizer**: `bos_token=None`, `eos_token=None`
 - **Init head**: re-init `lm_head` (std=0.02), `ignore_mismatched_sizes=True`
 - **Hyperparams benchmark**: LR `3e-5`, `warmup_ratio=0.1`, `gradient_accumulation_steps=4`
-- **Memoria**: `fp16=True`, `gradient_checkpointing=True`, **auto 4-bit** (linear probing: solo `lm_head`) se VRAM < 16GB
+- **Memoria**: `fp16=True`, `gradient_checkpointing=True`
+- **Anti-OOM**: bucketing `group_by_length=True` e (se necessario) `--max-audio-seconds`
 - **Monitoring**: `PredictionMonitorCallback` ogni 100 step
 
 ### Script
@@ -278,7 +282,8 @@ Vedi `scripts/training/train_mctct.py`.
 - **Vocab custom**: `data/processed/vocab.json`
 - **Tokenizer**: `bos_token=None`, `eos_token=None`
 - **Init head**: re-init `lm_head` (std=0.02), `ignore_mismatched_sizes=True`
-- **Memoria (obbligatorio)**: carico in **4-bit** (NF4) con `BitsAndBytesConfig` + **linear probing** (solo `lm_head` trainabile)
+- **Memoria (consigliato)**: carico in **4-bit** (NF4) con `BitsAndBytesConfig` quando la VRAM è limitata
+- **Training mode**: tipicamente **linear probing** (solo `lm_head` trainabile) per stare entro 16GB
 - **Hyperparams benchmark**: LR `3e-5`, `warmup_ratio=0.1`, `gradient_accumulation_steps=4`, `fp16=True`
 - **Monitoring**: `PredictionMonitorCallback` ogni 100 step
 
@@ -366,11 +371,15 @@ Modello "stupido" di controllo. Se un classificatore semplice su feature medie f
 | **Early Fusion** | Raw Waveform | 413M+2K | Frozen+CTC | ~8GB | 🆕 UPDATED | `train_early_fusion.py` |
 | WavLM Base/Large | Raw Waveform | 317M | Fine-tuning | ~12GB | ✅ Works | `train_wavlm.py` |
 | XLS-R 300M | Raw Waveform | 300M | Fine-tuning | ~10GB | ✅ Works | `train_xlsr.py` |
+| XLS-R 1B | Raw Waveform | 1B | Fine-tuning / QLoRA | ~16GB / ~8GB | ⏳ TBD | `train_xlsr_1b.py` |
 | Baseline MLP | Raw Waveform | 2M train | Linear Probe | ~4GB | ✅ Works | `train_baseline_mlp.py` |
 | Whisper Small (Encoder) | Mel Spectrogram | 244M | Partial Fine-tuning | ~8GB | ❌ Failed | `train_whisper_encoder.py` |
 | Wav2Vec2-BERT | Mel Spectrogram | 600M | Fine-tuning | ~12GB | ❌ Failed | `train_w2v2_bert.py` |
 | Qwen2-Audio | Mel Spectrogram | 260K train | Linear Probe | ~5GB | ⏳ TBD | `train_qwen_audio.py` |
 | SpeechTokenizer | Discrete Tokens | 256K train | 2-Stage | ~4GB | ⚠️ Partial | `train_speechtokenizer.py` |
-| MMS 1B | Raw Waveform | 1B | Fine-tuning | ~16GB | ⏳ TBD | `train_mms.py` |
+| Data2Vec2 Large | Raw Waveform | 317M | Fine-tuning | ~12GB | ⏳ TBD | `train_data2vec2.py` |
+| MMS 1B | Raw Waveform | 1B | Fine-tuning / QLoRA | ~16GB / ~8GB | ⏳ TBD | `train_mms_1b.py` |
+| M-CTC-T (Meta) | Mel Spectrogram | ~? | Fine-tuning | ~10-12GB | ⏳ TBD | `train_mctct.py` |
+| Parakeet-CTC 1.1B | Audio 16kHz | 1.1B | Linear Probe (4-bit) | ~? | ⏳ TBD | `train_parakeet.py` |
 
-> **💡 Key Insight**: All models with **Raw Waveform** input (`input_values`) work well. Models requiring **Mel Spectrogram** (`input_features`) fail due to pre-training/CTC mismatch. See [ARCHITECTURE_DETAILS.md](ARCHITECTURE_DETAILS.md#8--input-types-vs-performance---critical-analysis) for detailed analysis.
+> **💡 Key Insight**: L'input type conta, ma la differenza vera la fanno **pre-training + preprocessing corretto**. Alcuni modelli mel-based (es. Whisper Encoder) hanno fallito per mismatch architetturale/CTC; altri modelli CTC nativi (es. M-CTC-T) sono progettati per lavorare su feature 2D.

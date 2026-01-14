@@ -27,7 +27,7 @@ Per dettagli sulle metriche, vedi **[docs/BENCHMARK_GUIDE.md](docs/BENCHMARK_GUI
 | M-CTC-T (Meta) | Mel Spectrogram | TBD | TBD | TBD | New: Meta Mel-CTC baseline (speechbrain/m-ctc-t-large) |
 | Parakeet-CTC 1.1B | Audio 16kHz | TBD | TBD | TBD | New: FastConformer-CTC baseline (4-bit linear probing) |
 
-> **⚠️ Key Finding**: Models using **raw waveform input** (`input_values`) all work (PER < 50%). Models using **mel spectrogram** (`input_features`) all fail (PER > 80%). See [ARCHITECTURE_DETAILS.md](ARCHITECTURE_DETAILS.md#8--input-types-vs-performance---critical-analysis) for analysis.
+> **⚠️ Key Finding (updated)**: I modelli raw waveform hanno funzionato in modo più "plug-and-play". I modelli con feature 2D hanno richiesto setup molto più delicato (feature extractor + shape + CTC), e alcuni esperimenti sono falliti per mismatch. Vedi [ARCHITECTURE_DETAILS.md](ARCHITECTURE_DETAILS.md#8--input-types-vs-performance---critical-analysis).
 
 ---
 
@@ -69,10 +69,12 @@ Per dettagli sulle metriche, vedi **[docs/BENCHMARK_GUIDE.md](docs/BENCHMARK_GUI
 | **Early Fusion** | 1e-4 | 2 | 5 | **Frozen+CTC** | `train_early_fusion.py` |
 | **Wav2Vec2 Phoneme (lv60-pmp)** | **3e-5** | 4 | 10 | Fine-tuning (domain init) | `train_wav2vec2_phoneme.py` |
 | **Data2Vec2 Large** | **3e-5** | 4 | 10 | Fine-tuning (CTC) | `train_data2vec2.py` |
-| **XLS-R 1B** | **3e-5** | 2 | 10 | Fine-tuning (CTC) | `train_xlsr_1b.py` |
-| **MMS-1B** | **3e-5** | 4 | 10 | Fine-tuning (CTC) | `train_mms_1b.py` |
-| **M-CTC-T (Meta)** | **3e-5** | 2 | 10 | Fine-tuning (CTC) | `train_mctct.py` |
+| **XLS-R 1B** | **3e-5** | 1 | 10 | Fine-tuning / QLoRA (CTC) | `train_xlsr_1b.py` |
+| **MMS-1B** | **3e-5** | 1 | 10 | Fine-tuning / QLoRA (CTC) | `train_mms_1b.py` |
+| **M-CTC-T (Meta)** | **3e-5** | 1-2 | 10 | Fine-tuning (CTC) | `train_mctct.py` |
 | **Parakeet-CTC 1.1B** | **3e-5** | 1 | 10 | **Linear Probe (4-bit)** | `train_parakeet.py` |
+
+> **Nota VRAM (1B)**: su 16GB spesso serve `--max-audio-seconds`, bucketing (`group_by_length`) e/o QLoRA (`--load-in-4bit`).
 
 ---
 
