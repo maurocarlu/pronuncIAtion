@@ -200,7 +200,9 @@ def train_mms_1b(
 		)
 		for p in model.parameters():
 			p.requires_grad = False
+		# Train solo la CTC head: tienila in FP32 per evitare crash AMP ("Attempting to unscale FP16 gradients")
 		model.lm_head.requires_grad_(True)
+		model.lm_head.to(dtype=torch.float32)
 		nn.init.normal_(model.lm_head.weight, mean=0.0, std=0.02)
 		nn.init.zeros_(model.lm_head.bias)
 	else:
@@ -314,6 +316,8 @@ def train_mms_1b(
 		model.to(device)
 		if torch.cuda.is_available():
 			model.half()
+			# Head in FP32 (stabilità + evita crash GradScaler)
+			model.lm_head.to(dtype=torch.float32)
 
 	optimizer = torch.optim.AdamW(
 		[p for p in model.parameters() if p.requires_grad],
@@ -446,7 +450,8 @@ def main():
 	parser.add_argument("--warmup-ratio", type=float, default=0.1)
 	parser.add_argument("--gradient-accumulation-steps", type=int, default=4)
 	parser.add_argument("--resume", action="store_true")
-	parser.add_argument("--auto-4bit", action="store_true", default=True)
+	parser.add_argument("--auto-4bit", dest="auto_4bit", action="store_true", default=True)
+	parser.add_argument("--no-auto-4bit", dest="auto_4bit", action="store_false", help="Disable auto 4-bit")
 	parser.add_argument("--use-4bit", action="store_true", help="Force 4-bit (overrides auto)")
 
 	args = parser.parse_args()

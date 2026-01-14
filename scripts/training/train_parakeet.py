@@ -364,6 +364,8 @@ def train_parakeet(
 
     ctc_head = _get_ctc_head(model)
     ctc_head.requires_grad_(True)
+    # Head in FP32: evita crash torch.amp GradScaler su Kaggle ("Attempting to unscale FP16 gradients")
+    ctc_head.to(dtype=torch.float32)
     _reinit_ctc_head(ctc_head, std=0.02)
 
     try:

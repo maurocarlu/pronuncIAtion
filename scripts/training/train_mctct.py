@@ -281,6 +281,12 @@ def train_mctct(
         print(f"   GPU VRAM: {vram_gb:.1f} GB")
     print(f"   4-bit quantization: {'ON' if want_4bit else 'OFF'}")
 
+    # IMPORTANT: Transformers Trainer (versioni recenti) blocca il training su modelli puramente quantizzati.
+    # Questo script usa Trainer (non loop manuale), quindi disabilitiamo 4-bit per evitare crash.
+    if want_4bit:
+        print("   ⚠️ Trainer non supporta fine-tuning su modelli 4-bit puri: disabilito 4-bit e carico in fp16.")
+        want_4bit = False
+
     model_kwargs: Dict[str, Any] = dict(
         vocab_size=vocab_size,
         ctc_loss_reduction="mean",
@@ -487,7 +493,8 @@ def main():
     parser.add_argument("--warmup-ratio", type=float, default=0.1)
     parser.add_argument("--gradient-accumulation-steps", type=int, default=4)
     parser.add_argument("--resume", action="store_true")
-    parser.add_argument("--auto-4bit", action="store_true", default=True)
+    parser.add_argument("--auto-4bit", dest="auto_4bit", action="store_true", default=True)
+    parser.add_argument("--no-auto-4bit", dest="auto_4bit", action="store_false", help="Disable auto 4-bit")
     parser.add_argument("--use-4bit", action="store_true", help="Force 4-bit (overrides auto)")
     parser.add_argument(
         "--force-download",
