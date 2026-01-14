@@ -137,6 +137,8 @@ def train_mms_1b(
 	learning_rate: float = 3e-5,
 	warmup_ratio: float = 0.1,
 	gradient_accumulation_steps: int = 4,
+	eval_every_steps: int = 1000,
+	eval_max_batches: int = 10,
 	resume: bool = False,
 	auto_4bit: bool = True,
 	use_4bit: bool = False,
@@ -351,12 +353,12 @@ def train_mms_1b(
 		pred_ids = torch.argmax(logits, dim=-1).detach().cpu().numpy()
 		return processor.batch_decode(pred_ids)
 
-	def _eval_cer() -> float:
+	def _eval_cer(max_batches: Optional[int] = None) -> float:
 		model.eval()
 		preds: List[str] = []
 		refs: List[str] = []
 		with torch.no_grad():
-			for batch in val_loader:
+			for i, batch in enumerate(val_loader):
 				batch = {k: (v.to(device) if isinstance(v, torch.Tensor) else v) for k, v in batch.items()}
 				with torch.cuda.amp.autocast(enabled=torch.cuda.is_available(), dtype=torch.float16):
 					out = model(**batch)
@@ -371,6 +373,9 @@ def train_mms_1b(
 					if r.strip():
 						preds.append(p)
 						refs.append(r)
+
+				if max_batches is not None and (i + 1) >= max_batches:
+					break
 
 		if not refs:
 			return 1.0
@@ -396,6 +401,13 @@ def train_mms_1b(
 			model.train()
 
 	print("\n🚀 Starting training (manual loop)...")
+	if eval_every_steps and eval_every_steps > 0:
+		print(
+			f"   ℹ️ CER durante training: ogni {eval_every_steps} step (val batches={eval_max_batches}). "
+			"CER completo a fine epoca."
+		)
+	else:
+		print("   ℹ️ CER calcolato solo a fine epoca (usa --eval-every-steps per metriche durante training).")
 	model.train()
 	global_step = 0
 	best_cer = None
@@ -432,7 +444,11 @@ def train_mms_1b(
 				if global_step % 100 == 0:
 					_print_sample(global_step)
 
-		cer = _eval_cer()
+				if eval_every_steps and eval_every_steps > 0 and global_step % eval_every_steps == 0:
+					cer_mid = _eval_cer(max_batches=eval_max_batches)
+					print(f"\n📈 [Step {global_step}] CER(val, ~subset): {cer_mid:.4f}")
+
+		cer = _eval_cer(max_batches=None)
 		print(f"\n✅ Epoch {epoch} CER: {cer:.4f}")
 
 		if best_cer is None or cer < best_cer:
@@ -467,6 +483,18 @@ def main():
 	parser.add_argument("--learning-rate", type=float, default=3e-5)
 	parser.add_argument("--warmup-ratio", type=float, default=0.1)
 	parser.add_argument("--gradient-accumulation-steps", type=int, default=4)
+	parser.add_argument(
+		"--eval-every-steps",
+		type=int,
+		default=1000,
+		help="Ogni quanti step calcolare una CER veloce sul validation set (0 = disabilita).",
+	)
+	parser.add_argument(
+		"--eval-max-batches",
+		type=int,
+		default=10,
+		help="Numero di batch di validation usati per la CER veloce (solo per --eval-every-steps).",
+	)
 	parser.add_argument("--resume", action="store_true")
 	parser.add_argument("--auto-4bit", dest="auto_4bit", action="store_true", default=True)
 	parser.add_argument("--no-auto-4bit", dest="auto_4bit", action="store_false", help="Disable auto 4-bit")
@@ -485,6 +513,8 @@ def main():
 		learning_rate=args.learning_rate,
 		warmup_ratio=args.warmup_ratio,
 		gradient_accumulation_steps=args.gradient_accumulation_steps,
+		eval_every_steps=args.eval_every_steps,
+		eval_max_batches=args.eval_max_batches,
 		resume=args.resume,
 		auto_4bit=args.auto_4bit,
 		use_4bit=args.use_4bit,
