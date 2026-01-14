@@ -138,6 +138,7 @@ def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bo
     is_baseline_mlp = False
     is_xlsr_model = False
     is_mms_model = False
+    is_data2vec2_model = False
     is_hubert_model = False
     is_mctct_model = False
     is_parakeet_model = False
@@ -178,6 +179,9 @@ def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bo
             or "parakeet" in name0
         )
         is_mms_model = "mms-1b" in name0
+
+        # Data2Vec2 (coerente con scripts/training/train_data2vec2.py che usa AutoModelForCTC)
+        is_data2vec2_model = "data2vec" in arch0 or "data2vec" in name0 or "data2vec" in model_type0
         is_xlsr_model = (not is_w2v_bert) and (not is_mms_model) and (
             "wav2vec2" in config.get("architectures", [""])[0].lower() or
             "xlsr" in str(config.get("_name_or_path", "")).lower()
@@ -206,6 +210,9 @@ def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bo
         elif "mms" in path_str:
             print(f"   ℹ️ Detected 'mms' in path.")
             is_mms_model = True
+        elif "data2vec" in path_str:
+            print(f"   ℹ️ Detected 'data2vec' in path.")
+            is_data2vec2_model = True
         elif "wav2vec2" in path_str or "xlsr" in path_str:
             print(f"   ℹ️ Detected 'wav2vec2/xlsr' in path.")
             is_xlsr_model = True
@@ -351,6 +358,12 @@ def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bo
                 "Vedi scripts/training/train_parakeet.py"
             ) from e
         model = ParakeetForCTC.from_pretrained(model_path)
+
+    elif is_data2vec2_model:
+        print("   Tipo: AutoModelForCTC (Data2Vec2)")
+        from transformers import AutoModelForCTC
+
+        model = AutoModelForCTC.from_pretrained(model_path)
         
     elif is_xlsr_model:
         print("   Tipo: Wav2Vec2ForCTC (XLS-R 1B)")
