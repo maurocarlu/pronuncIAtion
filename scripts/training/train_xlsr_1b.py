@@ -94,6 +94,40 @@ def _compute_cer(predictions: List[str], references: List[str]) -> float:
         return float(total_edits / max(1, total_chars))
 
 
+def _prepare_model_for_kbit_training_audio(model: nn.Module) -> nn.Module:
+    """Fallback for PEFT QLoRA on audio models without input embeddings.
+
+    Newer PEFT versions call `model.enable_input_require_grads()`, which relies on
+    `get_input_embeddings()` and fails for Wav2Vec2-style models.
+
+    We replicate the useful parts:
+    - cast LayerNorms to fp32 for stability
+    - ensure a tensor entering the encoder requires grad (needed by checkpoint)
+    """
+    for module in model.modules():
+        if isinstance(module, nn.LayerNorm):
+            module.to(torch.float32)
+
+    base = getattr(model, "wav2vec2", None)
+    feature_projection = getattr(base, "feature_projection", None) if base is not None else None
+    if feature_projection is not None:
+
+        def _make_outputs_require_grads(_module, _inputs, output):
+            if torch.is_tensor(output):
+                output.requires_grad_(True)
+            elif isinstance(output, (tuple, list)):
+                for out in output:
+                    if torch.is_tensor(out):
+                        out.requires_grad_(True)
+
+        try:
+            model._require_grads_hook = feature_projection.register_forward_hook(_make_outputs_require_grads)
+        except Exception:
+            pass
+
+    return model
+
+
 class PredictionMonitorCallback(TrainerCallback):
     """Stampa predizione esempio ogni N step per monitorare blank collapse."""
 
@@ -307,7 +341,11 @@ def train_xlsr_1b(
                 "Su Kaggle: pip install -q peft bitsandbytes"
             ) from e
 
-        model = prepare_model_for_kbit_training(model)
+        try:
+            model = prepare_model_for_kbit_training(model)
+        except NotImplementedError:
+            # Wav2Vec2-style models don't implement get_input_embeddings()
+            model = _prepare_model_for_kbit_training_audio(model)
         lora_config = LoraConfig(
             r=lora_r,
             lora_alpha=lora_alpha,
