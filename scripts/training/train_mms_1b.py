@@ -133,6 +133,7 @@ def train_mms_1b(
 	audio_base_path: str = ".",
 	epochs: int = 10,
 	batch_size: int = 4,
+	max_samples: Optional[int] = None,
 	learning_rate: float = 3e-5,
 	warmup_ratio: float = 0.1,
 	gradient_accumulation_steps: int = 4,
@@ -242,6 +243,15 @@ def train_mms_1b(
 
 	print(f"   Train: {len(train_ds)} | Val: {len(val_ds)}")
 
+	if max_samples is not None:
+		if max_samples <= 0:
+			raise ValueError("--max-samples deve essere > 0")
+		n_train = min(max_samples, len(train_ds))
+		n_val = min(max_samples, len(val_ds))
+		train_ds = train_ds.select(range(n_train))
+		val_ds = val_ds.select(range(n_val))
+		print(f"   Subsample attivo: Train={n_train} | Val={n_val}")
+
 	import librosa
 
 	def preprocess(batch):
@@ -273,25 +283,27 @@ def train_mms_1b(
 		remove_columns=train_ds.column_names,
 		num_proc=1,
 		load_from_cache_file=False,
-		keep_in_memory=True,
+		keep_in_memory=False,
+		desc="Preprocessing train",
 	)
 	val_ds = val_ds.map(
 		preprocess,
 		remove_columns=val_ds.column_names,
 		num_proc=1,
 		load_from_cache_file=False,
-		keep_in_memory=True,
+		keep_in_memory=False,
+		desc="Preprocessing val",
 	)
 
 	train_ds = train_ds.filter(
 		lambda x: x["label_length"] > 0 and x["label_length"] < x["input_length"] // 320,
 		load_from_cache_file=False,
-		keep_in_memory=True,
+		keep_in_memory=False,
 	)
 	val_ds = val_ds.filter(
 		lambda x: x["label_length"] > 0 and x["label_length"] < x["input_length"] // 320,
 		load_from_cache_file=False,
-		keep_in_memory=True,
+		keep_in_memory=False,
 	)
 
 	train_ds.set_format(type=None, columns=["input_values", "labels"])
@@ -446,6 +458,12 @@ def main():
 	parser.add_argument("--output-dir", type=str, default="outputs/mms_1b")
 	parser.add_argument("--epochs", type=int, default=10)
 	parser.add_argument("--batch-size", type=int, default=4)
+	parser.add_argument(
+		"--max-samples",
+		type=int,
+		default=None,
+		help="Limita il numero di sample (train e val) per sanity run veloci. Esempio: --max-samples 200",
+	)
 	parser.add_argument("--learning-rate", type=float, default=3e-5)
 	parser.add_argument("--warmup-ratio", type=float, default=0.1)
 	parser.add_argument("--gradient-accumulation-steps", type=int, default=4)
@@ -463,6 +481,7 @@ def main():
 		audio_base_path=args.audio_base,
 		epochs=args.epochs,
 		batch_size=args.batch_size,
+		max_samples=args.max_samples,
 		learning_rate=args.learning_rate,
 		warmup_ratio=args.warmup_ratio,
 		gradient_accumulation_steps=args.gradient_accumulation_steps,
