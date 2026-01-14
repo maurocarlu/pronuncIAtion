@@ -356,7 +356,8 @@ def train_mms_1b(
 			lora_dropout=lora_dropout,
 			bias="none",
 			target_modules=["q_proj", "k_proj", "v_proj", "out_proj"],
-			task_type="CTC",
+			# PEFT non supporta un task_type "CTC"; per modelli audio con CTC usiamo FEATURE_EXTRACTION.
+			task_type="FEATURE_EXTRACTION",
 			modules_to_save=["lm_head"],
 		)
 		model = get_peft_model(model, lora_config)

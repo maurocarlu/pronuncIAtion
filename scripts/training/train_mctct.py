@@ -28,6 +28,10 @@ from collections.abc import Mapping
 from typing import Any, Dict, List, Optional
 
 import numpy as np
+
+# Helps reduce CUDA memory fragmentation. Must be set before the first CUDA allocation.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 import torch
 import torch.nn as nn
 from datasets import load_dataset
@@ -102,6 +106,21 @@ def _get_vram_gb() -> Optional[float]:
         return None
     props = torch.cuda.get_device_properties(0)
     return props.total_memory / (1024**3)
+
+
+def _configure_torch_runtime() -> None:
+    if not torch.cuda.is_available():
+        return
+    try:
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+    except Exception:
+        pass
+    try:
+        # PyTorch 2.x only
+        torch.set_float32_matmul_precision("high")
+    except Exception:
+        pass
 
 
 def _extract_input_features(processed: Any) -> Any:
@@ -221,16 +240,22 @@ def train_mctct(
     hf_token: Optional[str] = None,
     epochs: int = 10,
     batch_size: int = 2,
+    eval_batch_size: Optional[int] = None,
     learning_rate: float = 3e-5,
     warmup_ratio: float = 0.1,
     gradient_accumulation_steps: int = 4,
     group_by_length: bool = True,
+    max_audio_seconds: Optional[float] = None,
+    long_audio_policy: str = "truncate",
+    keep_in_memory: bool = True,
     resume: bool = False,
     force_download: bool = False,
 ):
     print("=" * 60)
     print(f"TRAINING M-CTC-T ({checkpoint}) - CTC")
     print("=" * 60)
+
+    _configure_torch_runtime()
 
     hf_token = _resolve_hf_token(hf_token)
 
@@ -281,11 +306,23 @@ def train_mctct(
         ignore_mismatched_sizes=True,
     )
 
-    print("\n📦 Loading M-CTC-T in fp16...")
+    eval_batch_size = int(eval_batch_size) if eval_batch_size is not None else int(batch_size)
+    if eval_batch_size <= 0:
+        raise ValueError("eval_batch_size deve essere > 0")
+
+    if max_audio_seconds is not None and max_audio_seconds <= 0:
+        raise ValueError("max_audio_seconds deve essere > 0")
+    if long_audio_policy not in {"truncate", "drop"}:
+        raise ValueError("long_audio_policy deve essere 'truncate' o 'drop'")
+
+    torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+
+    print("\n📦 Loading M-CTC-T...")
     model = model_loader(
         checkpoint,
         force_download=force_download,
         token=hf_token,
+        torch_dtype=torch_dtype,
         **model_kwargs,
     )
     ctc_head = _get_ctc_head(model)
@@ -326,6 +363,10 @@ def train_mctct(
 
     import librosa
 
+    max_len_samples: Optional[int] = None
+    if max_audio_seconds is not None:
+        max_len_samples = int(float(max_audio_seconds) * 16000)
+
     feature_size = None
     try:
         feature_size = getattr(processor.feature_extractor, "feature_size", None)
@@ -336,6 +377,11 @@ def train_mctct(
 
     def preprocess(batch):
         audio, _ = librosa.load(batch["audio_path"], sr=16000)
+        if max_len_samples is not None and len(audio) > max_len_samples:
+            if long_audio_policy == "truncate":
+                audio = audio[:max_len_samples]
+            else:
+                return {"input_features": [], "labels": [], "input_length": 0}
         # return_tensors="np" aiuta a mantenere shape consistente tra versioni di transformers
         processed = processor(audio, sampling_rate=16000, return_tensors="np")
         feats = _extract_input_features(processed)
@@ -363,14 +409,14 @@ def train_mctct(
         remove_columns=train_ds.column_names,
         num_proc=1,
         load_from_cache_file=False,
-        keep_in_memory=True,
+        keep_in_memory=keep_in_memory,
     )
     val_ds = val_ds.map(
         preprocess,
         remove_columns=val_ds.column_names,
         num_proc=1,
         load_from_cache_file=False,
-        keep_in_memory=True,
+        keep_in_memory=keep_in_memory,
     )
 
     train_ds = train_ds.filter(lambda x: x.get("input_length", 0) > 0, load_from_cache_file=False)
@@ -394,13 +440,13 @@ def train_mctct(
         output_dir=output_dir,
         num_train_epochs=epochs,
         per_device_train_batch_size=batch_size,
-        per_device_eval_batch_size=batch_size,
+        per_device_eval_batch_size=eval_batch_size,
         gradient_accumulation_steps=gradient_accumulation_steps,
         learning_rate=learning_rate,
         warmup_ratio=warmup_ratio,
         weight_decay=0.01,
         logging_steps=50,
-        eval_strategy="epoch",
+        evaluation_strategy="epoch",
         save_strategy="epoch",
         save_total_limit=2,
         load_best_model_at_end=True,
@@ -467,14 +513,39 @@ def main():
     )
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=2)
+    parser.add_argument(
+        "--eval-batch-size",
+        type=int,
+        default=None,
+        help="Batch size per eval (default: uguale a --batch-size). Riducilo se vai in OOM durante eval/save.",
+    )
     parser.add_argument("--learning-rate", type=float, default=3e-5)
     parser.add_argument("--warmup-ratio", type=float, default=0.1)
     parser.add_argument("--gradient-accumulation-steps", type=int, default=4)
 
     parser.add_argument(
+        "--max-audio-seconds",
+        type=float,
+        default=None,
+        help="Cap sulla durata audio (secondi). Utile su GPU 16GB per ridurre OOM (truncate/drop).",
+    )
+    parser.add_argument(
+        "--long-audio-policy",
+        type=str,
+        default="truncate",
+        choices=["truncate", "drop"],
+        help="Cosa fare con clip oltre --max-audio-seconds: truncate (default) o drop.",
+    )
+
+    parser.add_argument(
         "--no-group-by-length",
         action="store_true",
         help="Disabilita bucketing per lunghezza (può aumentare padding e peggiorare memoria/stabilità).",
+    )
+    parser.add_argument(
+        "--no-keep-in-memory",
+        action="store_true",
+        help="Non tenere il dataset preprocessato in RAM (consigliato se RAM limitata su Kaggle).",
     )
     parser.add_argument("--resume", action="store_true")
     parser.add_argument(
@@ -494,10 +565,14 @@ def main():
         hf_token=args.hf_token,
         epochs=args.epochs,
         batch_size=args.batch_size,
+        eval_batch_size=args.eval_batch_size,
         learning_rate=args.learning_rate,
         warmup_ratio=args.warmup_ratio,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         group_by_length=(not args.no_group_by_length),
+        max_audio_seconds=args.max_audio_seconds,
+        long_audio_policy=args.long_audio_policy,
+        keep_in_memory=(not args.no_keep_in_memory),
         resume=args.resume,
         force_download=args.force_download,
     )
