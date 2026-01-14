@@ -12,7 +12,14 @@ Linee guida implementate:
 - Monitoring: sample prediction ogni 100 step
 
 Uso:
-	python scripts/training/train_mms_1b.py --epochs 10 --output-dir outputs/mms_1b
+	# Full fine-tuning (richiede molta VRAM; su 16GB spesso va in OOM)
+	python scripts/training/train_mms_1b.py --epochs 10 --output-dir outputs/mms_1b --batch-size 1
+
+	# Fallback consigliato su 16GB: QLoRA (4-bit)
+	python scripts/training/train_mms_1b.py --epochs 10 --output-dir outputs/mms_1b --batch-size 1 --load-in-4bit
+
+	# Fallback ultra-light: linear probe (solo lm_head)
+	python scripts/training/train_mms_1b.py --epochs 10 --output-dir outputs/mms_1b --batch-size 1 --freeze-backbone
 """
 
 import argparse
@@ -23,6 +30,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import numpy as np
+
+# Helps reduce CUDA memory fragmentation. Must be set before the first CUDA allocation.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 import torch
 import torch.nn as nn
 from datasets import load_dataset
@@ -170,6 +181,8 @@ def train_mms_1b(
 	max_audio_seconds: Optional[float] = 12.0,
 	truncate_audio: bool = True,
 	group_by_length: bool = True,
+	freeze_backbone: bool = False,
+	optim: Optional[str] = None,
 	load_in_8bit: bool = False,
 	load_in_4bit: bool = False,
 	lora_r: int = 16,
@@ -204,6 +217,13 @@ def train_mms_1b(
 	vram_gb = _get_vram_gb()
 	if vram_gb is not None:
 		print(f"   GPU VRAM: {vram_gb:.1f} GB")
+		if vram_gb <= 16.5 and (not load_in_4bit and not load_in_8bit) and (not freeze_backbone):
+			print(
+				"\n⚠️  Nota VRAM: MMS-1B full fine-tuning su ~16GB spesso va in OOM "
+				"(optimizer states + attivazioni).\n"
+				"   Consigliato: --load-in-4bit (QLoRA) oppure --freeze-backbone (linear probe).\n"
+				"   Inoltre: --batch-size 1 --eval-batch-size 1 --max-audio-seconds 6-12"
+			)
 
 	model_kwargs: Dict[str, Any] = dict(
 		vocab_size=vocab_size,
@@ -258,12 +278,23 @@ def train_mms_1b(
 			**model_kwargs,
 		)
 
+	# TF32 can slightly reduce memory pressure / speed up matmuls on Ampere+.
+	# Safe no-op on older GPUs.
+	try:
+		torch.backends.cuda.matmul.allow_tf32 = True
+		torch.backends.cudnn.allow_tf32 = True
+	except Exception:
+		pass
+
 	try:
 		model.config.use_cache = False
 	except Exception:
 		pass
 
 	model.freeze_feature_encoder()
+	if freeze_backbone:
+		for name, param in model.named_parameters():
+			param.requires_grad = ("lm_head" in name)
 	try:
 		nn.init.normal_(model.lm_head.weight, mean=0.0, std=0.02)
 		nn.init.zeros_(model.lm_head.bias)
@@ -301,6 +332,9 @@ def train_mms_1b(
 		pass
 
 	print(f"   Total params: {sum(p.numel() for p in model.parameters())/1e9:.2f}B")
+	print(
+		f"   Trainable params: {sum(p.numel() for p in model.parameters() if p.requires_grad)/1e6:.2f}M"
+	)
 
 	print(f"\n📥 Loading dataset: {csv_path}")
 	ds = load_dataset("csv", data_files=csv_path)["train"]
@@ -419,6 +453,16 @@ def train_mms_1b(
 		preds, labels = zip(*valid)
 		return {"cer": _compute_cer(predictions=list(preds), references=list(labels))}
 
+	# Optimizer choice matters a lot for memory on 1B models.
+	if optim is None:
+		if use_qlora:
+			optim = "paged_adamw_8bit"
+		elif vram_gb is not None and vram_gb <= 16.5:
+			# Adafactor uses less optimizer state than AdamW (often still not enough for full FT).
+			optim = "adafactor"
+		else:
+			optim = "adamw_torch"
+
 	training_args = TrainingArguments(
 		output_dir=output_dir,
 		num_train_epochs=epochs,
@@ -442,6 +486,7 @@ def train_mms_1b(
 		length_column_name="input_length",
 		gradient_checkpointing=True,
 		max_grad_norm=1.0,
+		optim=optim,
 		report_to="none",
 		remove_unused_columns=False,
 	)
@@ -522,6 +567,17 @@ def main():
 		action="store_true",
 		help="Carica il modello quantizzato 4-bit NF4 (richiede bitsandbytes). Per training usa QLoRA.",
 	)
+	parser.add_argument(
+		"--freeze-backbone",
+		action="store_true",
+		help="Linear probe: congela tutto tranne lm_head (utile quando non puoi fare full fine-tuning).",
+	)
+	parser.add_argument(
+		"--optim",
+		type=str,
+		default=None,
+		help="Override optimizer Trainer (es. adafactor, adamw_torch, paged_adamw_8bit). Default: auto (paged_adamw_8bit per QLoRA).",
+	)
 	parser.add_argument("--lora-r", type=int, default=16)
 	parser.add_argument("--lora-alpha", type=int, default=32)
 	parser.add_argument("--lora-dropout", type=float, default=0.05)
@@ -553,6 +609,8 @@ def main():
 		max_audio_seconds=max_audio_seconds,
 		truncate_audio=(not args.no_truncate_audio),
 		group_by_length=(not args.no_group_by_length),
+		freeze_backbone=args.freeze_backbone,
+		optim=args.optim,
 		load_in_8bit=args.load_in_8bit,
 		load_in_4bit=args.load_in_4bit,
 		lora_r=args.lora_r,

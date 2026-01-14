@@ -23,6 +23,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import numpy as np
+
+# Helps reduce CUDA memory fragmentation. Must be set before the first CUDA allocation.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 import torch
 import torch.nn as nn
 from datasets import load_dataset
@@ -41,6 +45,13 @@ warnings.filterwarnings("ignore")
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 DEFAULT_CHECKPOINT = "facebook/wav2vec2-xls-r-1b"
+
+
+def _get_vram_gb() -> Optional[float]:
+    if not torch.cuda.is_available():
+        return None
+    props = torch.cuda.get_device_properties(0)
+    return props.total_memory / (1024**3)
 
 
 def _levenshtein_distance(a: str, b: str) -> int:
@@ -108,6 +119,12 @@ class PredictionMonitorCallback(TrainerCallback):
             pred_ids = torch.argmax(logits, dim=-1)[0]
             pred_str = self.processor.decode(pred_ids)
 
+            blank_id = getattr(getattr(model, "config", None), "pad_token_id", 0)
+            try:
+                blank_ratio = float((pred_ids == blank_id).float().mean().item())
+            except Exception:
+                blank_ratio = float("nan")
+
             label_ids = [i for i in sample["labels"] if i != -100]
             label_str = self.processor.decode(label_ids)
 
@@ -115,7 +132,9 @@ class PredictionMonitorCallback(TrainerCallback):
             print(f"   Target: {label_str[:80]}{'...' if len(label_str) > 80 else ''}")
             print(f"   Pred:   {pred_str[:80]}{'...' if len(pred_str) > 80 else ''}")
             if len(pred_str.strip()) == 0:
-                print("   ⚠️ WARNING: Empty prediction - possible blank collapse!")
+                print(f"   ⚠️ WARNING: Empty prediction (blank_ratio={blank_ratio:.3f})")
+                if blank_ratio == blank_ratio and blank_ratio > 0.98:
+                    print("   ⚠️ Likely blank collapse (almost all blank token).")
         except Exception as e:
             print(f"\n⚠️ Prediction monitor error: {e}")
         finally:
@@ -160,6 +179,8 @@ def train_xlsr_1b(
     max_audio_seconds: Optional[float] = 12.0,
     truncate_audio: bool = True,
     group_by_length: bool = True,
+    freeze_backbone: bool = False,
+    optim: Optional[str] = None,
     load_in_8bit: bool = False,
     load_in_4bit: bool = False,
     lora_r: int = 16,
@@ -190,6 +211,16 @@ def train_xlsr_1b(
     processor = Wav2Vec2Processor(feature_extractor=feature_extractor, tokenizer=tokenizer)
     vocab_size = len(tokenizer)
     print(f"   Vocab size: {vocab_size}")
+
+    vram_gb = _get_vram_gb()
+    if vram_gb is not None:
+        print(f"   GPU VRAM: {vram_gb:.1f} GB")
+        if vram_gb <= 16.5 and (not load_in_4bit and not load_in_8bit) and (not freeze_backbone):
+            print(
+                "\n⚠️  Nota VRAM: XLS-R 1B full fine-tuning su ~16GB spesso va in OOM.\n"
+                "   Consigliato: --load-in-4bit (QLoRA) oppure --freeze-backbone (linear probe).\n"
+                "   Inoltre: --batch-size 1 --eval-batch-size 1 --max-audio-seconds 6-12"
+            )
 
     model_kwargs: Dict[str, Any] = dict(
         vocab_size=vocab_size,
@@ -249,7 +280,18 @@ def train_xlsr_1b(
     except Exception:
         pass
 
+    # TF32 can slightly reduce memory pressure / speed up matmuls on Ampere+.
+    # Safe no-op on older GPUs.
+    try:
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+    except Exception:
+        pass
+
     model.freeze_feature_encoder()
+    if freeze_backbone:
+        for name, param in model.named_parameters():
+            param.requires_grad = ("lm_head" in name)
     try:
         nn.init.normal_(model.lm_head.weight, mean=0.0, std=0.02)
         nn.init.zeros_(model.lm_head.bias)
@@ -287,6 +329,9 @@ def train_xlsr_1b(
         pass
 
     print(f"   Total params: {sum(p.numel() for p in model.parameters())/1e9:.2f}B")
+    print(
+        f"   Trainable params: {sum(p.numel() for p in model.parameters() if p.requires_grad)/1e6:.2f}M"
+    )
 
     print(f"\n📥 Loading dataset: {csv_path}")
     ds = load_dataset("csv", data_files=csv_path)["train"]
@@ -406,6 +451,15 @@ def train_xlsr_1b(
         preds, labels = zip(*valid)
         return {"cer": _compute_cer(predictions=list(preds), references=list(labels))}
 
+    # Optimizer choice matters a lot for memory on 1B models.
+    if optim is None:
+        if use_qlora:
+            optim = "paged_adamw_8bit"
+        elif vram_gb is not None and vram_gb <= 16.5:
+            optim = "adafactor"
+        else:
+            optim = "adamw_torch"
+
     training_args = TrainingArguments(
         output_dir=output_dir,
         num_train_epochs=epochs,
@@ -429,6 +483,7 @@ def train_xlsr_1b(
         length_column_name="input_length",
         gradient_checkpointing=True,
         max_grad_norm=1.0,
+        optim=optim,
         report_to="none",
         remove_unused_columns=False,
     )
@@ -452,6 +507,7 @@ def train_xlsr_1b(
             print(f"\n🔄 Resuming from: {checkpoint}")
 
     print("\n🚀 Starting training...")
+    print("   (Nota: a fine epoca Trainer lancia evaluation + save; può sembrare un 'blocco' per 1-3 minuti)")
     trainer.train(resume_from_checkpoint=checkpoint)
 
     final_path = Path(output_dir) / "final_model"
@@ -509,6 +565,17 @@ def main():
         action="store_true",
         help="Carica il modello quantizzato 4-bit NF4 (richiede bitsandbytes). Per training usa QLoRA.",
     )
+    parser.add_argument(
+        "--freeze-backbone",
+        action="store_true",
+        help="Linear probe: congela tutto tranne lm_head (utile quando non puoi fare full fine-tuning).",
+    )
+    parser.add_argument(
+        "--optim",
+        type=str,
+        default=None,
+        help="Override optimizer Trainer (es. adafactor, adamw_torch, paged_adamw_8bit). Default: auto (paged_adamw_8bit per QLoRA).",
+    )
     parser.add_argument("--lora-r", type=int, default=16)
     parser.add_argument("--lora-alpha", type=int, default=32)
     parser.add_argument("--lora-dropout", type=float, default=0.05)
@@ -540,6 +607,8 @@ def main():
         max_audio_seconds=max_audio_seconds,
         truncate_audio=(not args.no_truncate_audio),
         group_by_length=(not args.no_group_by_length),
+        freeze_backbone=args.freeze_backbone,
+        optim=args.optim,
         load_in_8bit=args.load_in_8bit,
         load_in_4bit=args.load_in_4bit,
         lora_r=args.lora_r,
