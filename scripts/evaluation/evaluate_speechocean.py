@@ -17,7 +17,6 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 import numpy as np
-import evaluate
 from datasets import load_dataset, Audio
 
 # Aggiungi project root al path (2 livelli su da scripts/evaluation/)
@@ -71,6 +70,48 @@ def ctc_greedy_decode(token_ids, blank_id: int = 0):
     return result
 
 
+def _levenshtein_distance(a: str, b: str) -> int:
+    if a == b:
+        return 0
+    if not a:
+        return len(b)
+    if not b:
+        return len(a)
+
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, start=1):
+        cur = [i]
+        for j, cb in enumerate(b, start=1):
+            ins = cur[j - 1] + 1
+            dele = prev[j] + 1
+            sub = prev[j - 1] + (0 if ca == cb else 1)
+            cur.append(min(ins, dele, sub))
+        prev = cur
+    return prev[-1]
+
+
+def _compute_cer(predictions: list[str], references: list[str]) -> float:
+    """CER locale (come negli script di training) per evitare evaluate.load("cer") su Kaggle."""
+    try:
+        import jiwer
+
+        return float(jiwer.cer(references, predictions))
+    except Exception:
+        pass
+
+    if not references:
+        return 0.0
+    if len(predictions) != len(references):
+        raise ValueError("predictions e references devono avere stessa lunghezza")
+
+    edits = 0
+    chars = 0
+    for p, r in zip(predictions, references):
+        edits += _levenshtein_distance(p, r)
+        chars += len(r)
+    return float(edits) / float(max(1, chars))
+
+
 def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bool = False):
     """Valuta modello su SpeechOcean762 con benchmark scientifico completo."""
     from transformers import Wav2Vec2Processor, WavLMForCTC, WavLMModel
@@ -96,7 +137,10 @@ def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bo
     is_weighted_model = False
     is_baseline_mlp = False
     is_xlsr_model = False
+    is_mms_model = False
     is_hubert_model = False
+    is_mctct_model = False
+    is_parakeet_model = False
     is_speechtokenizer = False
     is_whisper_encoder = False
     is_qwen_audio = False
@@ -117,7 +161,24 @@ def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bo
         is_w2v_bert = config.get("model_type") == "wav2vec2-bert" or \
                       "wav2vec2bert" in config.get("architectures", [""])[0].lower() or \
                       "w2v-bert" in str(config.get("_name_or_path", "")).lower()
-        is_xlsr_model = (not is_w2v_bert) and (
+
+        # Nuovi modelli (coerenti con scripts/training/train_mctct.py e train_parakeet.py)
+        arch0 = (config.get("architectures", [""])[0] or "").lower()
+        name0 = str(config.get("_name_or_path", "")).lower()
+        model_type0 = str(config.get("model_type", "")).lower()
+        is_mctct_model = (
+            "mctct" in model_type0
+            or "m-ctc-t" in model_type0
+            or "mctct" in arch0
+            or "m-ctc-t" in name0
+        )
+        is_parakeet_model = (
+            "parakeet" in model_type0
+            or "parakeet" in arch0
+            or "parakeet" in name0
+        )
+        is_mms_model = "mms-1b" in name0
+        is_xlsr_model = (not is_w2v_bert) and (not is_mms_model) and (
             "wav2vec2" in config.get("architectures", [""])[0].lower() or
             "xlsr" in str(config.get("_name_or_path", "")).lower()
         )
@@ -136,6 +197,15 @@ def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bo
         elif "w2v-bert" in path_str or "w2v_bert" in path_str:
             print(f"   ℹ️ Detected 'w2v-bert' in path.")
             is_w2v_bert = True
+        elif "parakeet" in path_str:
+            print(f"   ℹ️ Detected 'parakeet' in path.")
+            is_parakeet_model = True
+        elif "m-ctc-t" in path_str or "mctct" in path_str:
+            print(f"   ℹ️ Detected 'm-ctc-t/mctct' in path.")
+            is_mctct_model = True
+        elif "mms" in path_str:
+            print(f"   ℹ️ Detected 'mms' in path.")
+            is_mms_model = True
         elif "wav2vec2" in path_str or "xlsr" in path_str:
             print(f"   ℹ️ Detected 'wav2vec2/xlsr' in path.")
             is_xlsr_model = True
@@ -151,7 +221,35 @@ def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bo
     print("\n📦 Caricamento modello...")
     
     # Per modelli custom, usa solo tokenizer (non Wav2Vec2Processor completo)
-    if is_speechtokenizer or is_whisper_encoder or is_qwen_audio or is_early_fusion:
+    if is_mctct_model:
+        try:
+            from transformers import MCTCTProcessor
+
+            processor = MCTCTProcessor.from_pretrained(model_path)
+        except Exception:
+            # Fallback: carica processor dal checkpoint base e inietta il tokenizer salvato (come train_mctct.py)
+            from transformers import MCTCTProcessor, Wav2Vec2CTCTokenizer
+
+            tokenizer = Wav2Vec2CTCTokenizer.from_pretrained(model_path)
+            base_ckpt = config.get("_name_or_path") or "speechbrain/m-ctc-t-large"
+            processor = MCTCTProcessor.from_pretrained(base_ckpt)
+            processor.tokenizer = tokenizer
+
+    elif is_parakeet_model:
+        try:
+            from transformers import ParakeetProcessor
+
+            processor = ParakeetProcessor.from_pretrained(model_path)
+        except Exception:
+            # Fallback: come train_parakeet.py (processor base + tokenizer custom)
+            from transformers import ParakeetProcessor, Wav2Vec2CTCTokenizer
+
+            tokenizer = Wav2Vec2CTCTokenizer.from_pretrained(model_path)
+            base_ckpt = config.get("_name_or_path") or "nvidia/parakeet-ctc-1.1b"
+            processor = ParakeetProcessor.from_pretrained(base_ckpt)
+            processor.tokenizer = tokenizer
+
+    elif is_speechtokenizer or is_whisper_encoder or is_qwen_audio or is_early_fusion:
         from transformers import Wav2Vec2CTCTokenizer
         processor = Wav2Vec2CTCTokenizer.from_pretrained(model_path)
     elif is_w2v_bert:
@@ -231,9 +329,36 @@ def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bo
         print("   Tipo: Wav2Vec2BertForCTC (W2V-BERT 2.0)")
         from transformers import Wav2Vec2BertForCTC
         model = Wav2Vec2BertForCTC.from_pretrained(model_path)
+
+    elif is_mctct_model:
+        print("   Tipo: MCTCTForCTC (M-CTC-T)")
+        try:
+            from transformers import MCTCTForCTC
+        except Exception as e:
+            raise RuntimeError(
+                "MCTCTForCTC non disponibile: serve una versione recente di transformers. "
+                "Vedi scripts/training/train_mctct.py"
+            ) from e
+        model = MCTCTForCTC.from_pretrained(model_path)
+
+    elif is_parakeet_model:
+        print("   Tipo: ParakeetForCTC (Parakeet-CTC 1.1B)")
+        try:
+            from transformers import ParakeetForCTC
+        except Exception as e:
+            raise RuntimeError(
+                "ParakeetForCTC non disponibile: serve una versione di transformers che includa Parakeet. "
+                "Vedi scripts/training/train_parakeet.py"
+            ) from e
+        model = ParakeetForCTC.from_pretrained(model_path)
         
     elif is_xlsr_model:
-        print("   Tipo: Wav2Vec2ForCTC (XLS-R)")
+        print("   Tipo: Wav2Vec2ForCTC (XLS-R 1B)")
+        from transformers import Wav2Vec2ForCTC
+        model = Wav2Vec2ForCTC.from_pretrained(model_path)
+
+    elif is_mms_model:
+        print("   Tipo: Wav2Vec2ForCTC (MMS-1B)")
         from transformers import Wav2Vec2ForCTC
         model = Wav2Vec2ForCTC.from_pretrained(model_path)
         
@@ -1022,8 +1147,13 @@ def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bo
                         text = ""
                     predicted_texts.append(text)
             else:
-                # Standard decoding for wav2vec/wavlm/hubert
-                predicted_texts = processor.batch_decode(predicted_ids)
+                # Standard decoding for wav2vec/wavlm/hubert/mctct/parakeet
+                if hasattr(processor, "batch_decode"):
+                    predicted_texts = processor.batch_decode(predicted_ids)
+                elif hasattr(processor, "tokenizer") and hasattr(processor.tokenizer, "batch_decode"):
+                    predicted_texts = processor.tokenizer.batch_decode(predicted_ids)
+                else:
+                    raise AttributeError(f"Processor senza batch_decode: {type(processor)}")
             
             # Confidence scores
             probs = F.softmax(logits, dim=-1)
@@ -1065,7 +1195,6 @@ def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bo
     # PREPARA DATI PER ANALISI
     # ==========================================================================
     print("\n📊 Preparazione dati per analisi...")
-    cer_metric = evaluate.load("cer")
     
     all_data = []
     for i in range(len(results)):
@@ -1075,7 +1204,7 @@ def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bo
         if not pred or not ref:
             continue
         
-        per = cer_metric.compute(predictions=[pred], references=[ref])
+        per = _compute_cer(predictions=[pred], references=[ref])
         
         all_data.append({
             "human_score": results[i]["accuracy"],
@@ -1113,7 +1242,7 @@ def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bo
     high_quality_refs = [d["ref"] for d, m in zip(all_data, high_quality_mask) if m]
     
     if len(high_quality_preds) > 0:
-        per_high = cer_metric.compute(predictions=high_quality_preds, references=high_quality_refs)
+        per_high = _compute_cer(predictions=high_quality_preds, references=high_quality_refs)
         
         print(f"\n   📊 Risultati su High Quality (score >= 8):")
         print(f"   ─────────────────────────────────────────")
@@ -1126,7 +1255,7 @@ def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bo
             preds = [d["pred"] for d, m in zip(all_data, mask) if m]
             refs = [d["ref"] for d, m in zip(all_data, mask) if m]
             if len(preds) > 0:
-                per_t = cer_metric.compute(predictions=preds, references=refs)
+                per_t = _compute_cer(predictions=preds, references=refs)
                 print(f"      Score {threshold}: PER = {per_t * 100:.2f}% (n={len(preds)})")
     else:
         print("   ⚠️ Nessun esempio high quality trovato!")
