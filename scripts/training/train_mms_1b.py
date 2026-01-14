@@ -123,12 +123,24 @@ def _prepare_model_for_kbit_training_audio(model: nn.Module) -> nn.Module:
 	feature_projection = getattr(base, "feature_projection", None) if base is not None else None
 	if feature_projection is not None:
 		def _make_outputs_require_grads(_module, _inputs, output):
+			# IMPORTANT: do NOT call requires_grad_(True) on the output.
+			# That would make it a leaf tensor requiring grad, and Wav2Vec2 does
+			# in-place ops during SpecAugment (masking), which would crash:
+			# "a leaf Variable that requires grad is being used in an in-place operation".
+			# Instead, return a non-leaf tensor that requires grad.
 			if torch.is_tensor(output):
-				output.requires_grad_(True)
-			elif isinstance(output, (tuple, list)):
+				dummy = output.new_zeros((), requires_grad=True)
+				return output + dummy * 0.0
+			if isinstance(output, (tuple, list)):
+				new_out = []
 				for out in output:
 					if torch.is_tensor(out):
-						out.requires_grad_(True)
+						dummy = out.new_zeros((), requires_grad=True)
+						new_out.append(out + dummy * 0.0)
+					else:
+						new_out.append(out)
+				return tuple(new_out) if isinstance(output, tuple) else new_out
+			return None
 
 		try:
 			# Keep a reference so it won't get GC'd.
