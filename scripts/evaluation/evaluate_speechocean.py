@@ -123,6 +123,26 @@ def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bo
     
     # Inizializza normalizzatore
     normalizer = IPANormalizer(mode='strict')
+
+    # Sanity check: path locale
+    model_dir = Path(model_path)
+    if not model_dir.exists():
+        print(f"\n❌ Percorso modello non trovato: {model_path}")
+        # Suggerisci automaticamente alcune directory comuni (senza scandire tutta la repo).
+        candidates = []
+        for root in (Path("outputs/backup"), Path("outputs")):
+            if root.exists():
+                candidates.extend(sorted(root.glob("*/final_model")))
+        if candidates:
+            print("\nℹ️ Esempi di model_path validi trovati:")
+            for p in candidates[:12]:
+                print(f"   - {p.as_posix()}")
+        print("\nSuggerimento: passa la cartella che contiene i file del modello (es. config.json, model.safetensors, preprocessor_config.json).")
+        return None
+
+    if not model_dir.is_dir():
+        print(f"\n❌ model_path non è una directory: {model_path}")
+        return None
     
     print("=" * 70)
     print("🔬 BENCHMARK SCIENTIFICO - SPEECHOCEAN762")
