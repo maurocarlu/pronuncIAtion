@@ -11,7 +11,6 @@ Linee guida:
 - Inizializzazione: re-init lm_head (std=0.02) + ignore_mismatched_sizes=True
 - Stabilità CTC: ctc_zero_infinity=True
 - Memoria: fp16=True, gradient_checkpointing=True
-- 4-bit: auto se VRAM <16GB; in 4-bit facciamo linear probing (solo lm_head trainabile)
 - Hyperparams: learning_rate=3e-5, warmup_ratio=0.1, gradient_accumulation_steps=4
 - Monitoring: PredictionMonitorCallback ogni 100 step
 - Validazione/checkpoint: a fine epoca (CER locale)
@@ -34,7 +33,6 @@ import torch.nn as nn
 from datasets import load_dataset
 from transformers import MCTCTForCTC, MCTCTProcessor
 from transformers import (
-    BitsAndBytesConfig,
     Trainer,
     TrainerCallback,
     TrainingArguments,
@@ -104,17 +102,6 @@ def _get_vram_gb() -> Optional[float]:
         return None
     props = torch.cuda.get_device_properties(0)
     return props.total_memory / (1024**3)
-
-
-def _auto_use_4bit(auto_4bit: bool, force_4bit: bool) -> bool:
-    if force_4bit:
-        return True
-    if not auto_4bit:
-        return False
-    vram_gb = _get_vram_gb()
-    if vram_gb is None:
-        return False
-    return vram_gb < 16.0
 
 
 def _extract_input_features(processed: Any) -> Any:
@@ -230,8 +217,6 @@ def train_mctct(
     warmup_ratio: float = 0.1,
     gradient_accumulation_steps: int = 4,
     resume: bool = False,
-    auto_4bit: bool = True,
-    use_4bit: bool = False,
     force_download: bool = False,
 ):
     print("=" * 60)
@@ -273,19 +258,11 @@ def train_mctct(
         processor = base_processor
         processor.tokenizer = tokenizer
 
-    model_loader = MCTCTForCTC.from_pretrained
-
-    want_4bit = _auto_use_4bit(auto_4bit=auto_4bit, force_4bit=use_4bit)
     vram_gb = _get_vram_gb()
     if vram_gb is not None:
         print(f"   GPU VRAM: {vram_gb:.1f} GB")
-    print(f"   4-bit quantization: {'ON' if want_4bit else 'OFF'}")
 
-    # IMPORTANT: Transformers Trainer (versioni recenti) blocca il training su modelli puramente quantizzati.
-    # Questo script usa Trainer (non loop manuale), quindi disabilitiamo 4-bit per evitare crash.
-    if want_4bit:
-        print("   ⚠️ Trainer non supporta fine-tuning su modelli 4-bit puri: disabilito 4-bit e carico in fp16.")
-        want_4bit = False
+    model_loader = MCTCTForCTC.from_pretrained
 
     model_kwargs: Dict[str, Any] = dict(
         vocab_size=vocab_size,
@@ -295,42 +272,15 @@ def train_mctct(
         ignore_mismatched_sizes=True,
     )
 
-    if want_4bit:
-        try:
-            import bitsandbytes  # noqa: F401
-        except Exception:
-            print("   ⚠️ bitsandbytes non disponibile: disabilito 4-bit.")
-            want_4bit = False
-
-    if want_4bit:
-        print("\n📦 Loading M-CTC-T in 4-bit (NF4) - frozen backbone + train CTC head...")
-        bnb_config = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=torch.float16,
-        )
-        model = model_loader(
-            checkpoint,
-            quantization_config=bnb_config,
-            force_download=force_download,
-            token=hf_token,
-            **model_kwargs,
-        )
-        for p in model.parameters():
-            p.requires_grad = False
-        ctc_head = _get_ctc_head(model)
-        ctc_head.requires_grad_(True)
-        _reinit_ctc_head(ctc_head, std=0.02)
-    else:
-        print("\n📦 Loading M-CTC-T in fp16...")
-        model = model_loader(
-            checkpoint,
-            force_download=force_download,
-            token=hf_token,
-            **model_kwargs,
-        )
-        ctc_head = _get_ctc_head(model)
-        _reinit_ctc_head(ctc_head, std=0.02)
+    print("\n📦 Loading M-CTC-T in fp16...")
+    model = model_loader(
+        checkpoint,
+        force_download=force_download,
+        token=hf_token,
+        **model_kwargs,
+    )
+    ctc_head = _get_ctc_head(model)
+    _reinit_ctc_head(ctc_head, std=0.02)
 
     try:
         model.gradient_checkpointing_enable()
@@ -493,9 +443,6 @@ def main():
     parser.add_argument("--warmup-ratio", type=float, default=0.1)
     parser.add_argument("--gradient-accumulation-steps", type=int, default=4)
     parser.add_argument("--resume", action="store_true")
-    parser.add_argument("--auto-4bit", dest="auto_4bit", action="store_true", default=True)
-    parser.add_argument("--no-auto-4bit", dest="auto_4bit", action="store_false", help="Disable auto 4-bit")
-    parser.add_argument("--use-4bit", action="store_true", help="Force 4-bit (overrides auto)")
     parser.add_argument(
         "--force-download",
         action="store_true",
@@ -517,8 +464,6 @@ def main():
         warmup_ratio=args.warmup_ratio,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         resume=args.resume,
-        auto_4bit=args.auto_4bit,
-        use_4bit=args.use_4bit,
         force_download=args.force_download,
     )
 

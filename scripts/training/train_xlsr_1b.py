@@ -152,10 +152,14 @@ def train_xlsr_1b(
     audio_base_path: str = ".",
     epochs: int = 10,
     batch_size: int = 2,
+    eval_batch_size: Optional[int] = None,
     max_samples: Optional[int] = None,
     learning_rate: float = 3e-5,
     warmup_ratio: float = 0.1,
     gradient_accumulation_steps: int = 4,
+    max_audio_seconds: Optional[float] = 12.0,
+    truncate_audio: bool = True,
+    group_by_length: bool = True,
     resume: bool = False,
     force_download: bool = False,
 ):
@@ -243,6 +247,20 @@ def train_xlsr_1b(
 
     def preprocess(batch):
         audio, _ = librosa.load(batch["audio_path"], sr=16000)
+
+        if max_audio_seconds is not None and max_audio_seconds > 0:
+            duration_s = float(len(audio)) / 16000.0
+            if duration_s > max_audio_seconds:
+                if truncate_audio:
+                    audio = audio[: int(max_audio_seconds * 16000)]
+                else:
+                    return {
+                        "input_values": [],
+                        "labels": [],
+                        "input_length": 0,
+                        "label_length": 0,
+                    }
+
         inputs = processor(audio, sampling_rate=16000, return_tensors=None)
         input_values = inputs.input_values[0]
         if hasattr(input_values, "tolist"):
@@ -283,18 +301,22 @@ def train_xlsr_1b(
     )
 
     train_ds = train_ds.filter(
-        lambda x: x["label_length"] > 0 and x["label_length"] < x["input_length"] // 320,
+        lambda x: x["input_length"] > 0
+        and x["label_length"] > 0
+        and x["label_length"] < x["input_length"] // 320,
         load_from_cache_file=False,
         keep_in_memory=False,
     )
     val_ds = val_ds.filter(
-        lambda x: x["label_length"] > 0 and x["label_length"] < x["input_length"] // 320,
+        lambda x: x["input_length"] > 0
+        and x["label_length"] > 0
+        and x["label_length"] < x["input_length"] // 320,
         load_from_cache_file=False,
         keep_in_memory=False,
     )
 
-    train_ds.set_format(type=None, columns=["input_values", "labels"])
-    val_ds.set_format(type=None, columns=["input_values", "labels"])
+    train_ds.set_format(type=None, columns=["input_values", "labels", "input_length"])
+    val_ds.set_format(type=None, columns=["input_values", "labels", "input_length"])
 
     def compute_metrics(pred):
         pred_ids = np.argmax(pred.predictions, axis=-1)
@@ -311,7 +333,7 @@ def train_xlsr_1b(
         output_dir=output_dir,
         num_train_epochs=epochs,
         per_device_train_batch_size=batch_size,
-        per_device_eval_batch_size=batch_size,
+        per_device_eval_batch_size=(eval_batch_size or batch_size),
         gradient_accumulation_steps=gradient_accumulation_steps,
         learning_rate=learning_rate,
         warmup_ratio=warmup_ratio,
@@ -326,7 +348,8 @@ def train_xlsr_1b(
         fp16=True,
         bf16=False,
         dataloader_num_workers=0,
-        group_by_length=False,
+        group_by_length=group_by_length,
+        length_column_name="input_length",
         gradient_checkpointing=True,
         max_grad_norm=1.0,
         report_to="none",
@@ -367,7 +390,13 @@ def main():
     parser.add_argument("--audio-base", type=str, default=".")
     parser.add_argument("--output-dir", type=str, default="outputs/xlsr_1b")
     parser.add_argument("--epochs", type=int, default=10)
-    parser.add_argument("--batch-size", type=int, default=2)
+    parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument(
+        "--eval-batch-size",
+        type=int,
+        default=None,
+        help="Batch size per eval. Default: uguale a --batch-size (consigliato: 1 per 1B).",
+    )
     parser.add_argument(
         "--max-samples",
         type=int,
@@ -377,6 +406,22 @@ def main():
     parser.add_argument("--learning-rate", type=float, default=3e-5)
     parser.add_argument("--warmup-ratio", type=float, default=0.1)
     parser.add_argument("--gradient-accumulation-steps", type=int, default=4)
+    parser.add_argument(
+        "--max-audio-seconds",
+        type=float,
+        default=12.0,
+        help="Durata massima audio in secondi. Default 12s per evitare OOM sui 1B. Metti 0 per disabilitare.",
+    )
+    parser.add_argument(
+        "--no-truncate-audio",
+        action="store_true",
+        help="Se impostato, i sample oltre --max-audio-seconds vengono scartati invece che troncati.",
+    )
+    parser.add_argument(
+        "--no-group-by-length",
+        action="store_true",
+        help="Disabilita bucketing per lunghezza (può aumentare padding e memoria).",
+    )
     parser.add_argument("--resume", action="store_true")
     parser.add_argument(
         "--force-download",
@@ -386,6 +431,10 @@ def main():
 
     args = parser.parse_args()
 
+    max_audio_seconds = args.max_audio_seconds
+    if max_audio_seconds is not None and max_audio_seconds <= 0:
+        max_audio_seconds = None
+
     train_xlsr_1b(
         csv_path=args.data_csv,
         vocab_path=args.vocab_path,
@@ -393,10 +442,14 @@ def main():
         audio_base_path=args.audio_base,
         epochs=args.epochs,
         batch_size=args.batch_size,
+        eval_batch_size=args.eval_batch_size,
         max_samples=args.max_samples,
         learning_rate=args.learning_rate,
         warmup_ratio=args.warmup_ratio,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
+        max_audio_seconds=max_audio_seconds,
+        truncate_audio=(not args.no_truncate_audio),
+        group_by_length=(not args.no_group_by_length),
         resume=args.resume,
         force_download=args.force_download,
     )
