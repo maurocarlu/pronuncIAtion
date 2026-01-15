@@ -388,12 +388,64 @@ def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bo
     elif is_xlsr_model:
         print("   Tipo: Wav2Vec2ForCTC (XLS-R 1B)")
         from transformers import Wav2Vec2ForCTC
-        model = Wav2Vec2ForCTC.from_pretrained(model_path)
+        model_dir = Path(model_path)
+        is_adapter_only = (model_dir / "adapter_config.json").exists()
+        if is_adapter_only:
+            try:
+                from peft import PeftConfig, PeftModel
+            except Exception as e:
+                raise RuntimeError(
+                    "Checkpoint PEFT rilevato (adapter_config.json), ma peft non è installato. "
+                    "Installa: pip install -q peft"
+                ) from e
+
+            peft_cfg = PeftConfig.from_pretrained(model_path)
+            base_ckpt = peft_cfg.base_model_name_or_path or "facebook/wav2vec2-xls-r-1b"
+            try:
+                vocab_size = len(getattr(processor, "tokenizer", processor))
+            except Exception:
+                vocab_size = None
+
+            base_model = Wav2Vec2ForCTC.from_pretrained(
+                base_ckpt,
+                vocab_size=vocab_size,
+                ignore_mismatched_sizes=True,
+            )
+            model = PeftModel.from_pretrained(base_model, model_path)
+            print(f"   ✓ PEFT adapter caricato su base: {base_ckpt}")
+        else:
+            model = Wav2Vec2ForCTC.from_pretrained(model_path)
 
     elif is_mms_model:
         print("   Tipo: Wav2Vec2ForCTC (MMS-1B)")
         from transformers import Wav2Vec2ForCTC
-        model = Wav2Vec2ForCTC.from_pretrained(model_path)
+        model_dir = Path(model_path)
+        is_adapter_only = (model_dir / "adapter_config.json").exists()
+        if is_adapter_only:
+            try:
+                from peft import PeftConfig, PeftModel
+            except Exception as e:
+                raise RuntimeError(
+                    "Checkpoint PEFT rilevato (adapter_config.json), ma peft non è installato. "
+                    "Installa: pip install -q peft"
+                ) from e
+
+            peft_cfg = PeftConfig.from_pretrained(model_path)
+            base_ckpt = peft_cfg.base_model_name_or_path or "facebook/mms-1b-all"
+            try:
+                vocab_size = len(getattr(processor, "tokenizer", processor))
+            except Exception:
+                vocab_size = None
+
+            base_model = Wav2Vec2ForCTC.from_pretrained(
+                base_ckpt,
+                vocab_size=vocab_size,
+                ignore_mismatched_sizes=True,
+            )
+            model = PeftModel.from_pretrained(base_model, model_path)
+            print(f"   ✓ PEFT adapter caricato su base: {base_ckpt}")
+        else:
+            model = Wav2Vec2ForCTC.from_pretrained(model_path)
         
     elif is_hubert_model:
         print("   Tipo: HubertForCTC")

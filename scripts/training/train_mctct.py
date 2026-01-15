@@ -315,14 +315,14 @@ def train_mctct(
     if long_audio_policy not in {"truncate", "drop"}:
         raise ValueError("long_audio_policy deve essere 'truncate' o 'drop'")
 
-    torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+    dtype = torch.float16 if torch.cuda.is_available() else torch.float32
 
     print("\n📦 Loading M-CTC-T...")
     model = model_loader(
         checkpoint,
         force_download=force_download,
         token=hf_token,
-        torch_dtype=torch_dtype,
+        dtype=dtype,
         **model_kwargs,
     )
     ctc_head = _get_ctc_head(model)
@@ -446,7 +446,7 @@ def train_mctct(
         warmup_ratio=warmup_ratio,
         weight_decay=0.01,
         logging_steps=50,
-        evaluation_strategy="epoch",
+        eval_strategy="epoch",
         save_strategy="epoch",
         save_total_limit=2,
         load_best_model_at_end=True,

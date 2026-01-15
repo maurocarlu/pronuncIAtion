@@ -16,6 +16,9 @@ transformers>=4.35.0
 datasets>=2.14.0
 evaluate>=0.4.0
 
+# Parameter-Efficient Fine-Tuning (LoRA/QLoRA). Required to load adapter-only checkpoints.
+peft>=0.10.0
+
 # Optional: 4-bit quantization (needed for 1B models on <16GB VRAM)
 bitsandbytes
 
@@ -23,6 +26,10 @@ bitsandbytes
 jiwer
 accelerate
 safetensors>=0.4.0
+
+# Evaluation metrics
+scipy>=1.10.0
+scikit-learn>=1.2.0
 
 # Audio processing
 soundfile>=0.12.0
