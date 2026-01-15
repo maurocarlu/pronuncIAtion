@@ -47,6 +47,44 @@ from transformers import (
 	Wav2Vec2Processor,
 )
 
+
+class _PeftSafeSaveTrainer(Trainer):
+	"""Trainer che evita crash PEFT su Wav2Vec2 durante il salvataggio.
+
+	PEFT (versioni recenti) durante `save_pretrained()` prova a salvare anche
+	gli embedding layers e chiama `get_input_embeddings()`. I modelli Wav2Vec2
+	non lo implementano, quindi il checkpoint fallisce.
+
+	Workaround: se il modello è un PeftModel, salva l'adapter con
+	`save_embedding_layers=False`.
+	"""
+
+	def _save(self, output_dir: Optional[str] = None, state_dict=None):
+		output_dir = output_dir or self.args.output_dir
+		os.makedirs(output_dir, exist_ok=True)
+
+		model = self.model
+		is_peft_model = hasattr(model, "peft_config")
+		if is_peft_model:
+			try:
+				model.save_pretrained(
+					output_dir,
+					state_dict=state_dict,
+					safe_serialization=self.args.save_safetensors,
+					save_embedding_layers=False,
+				)
+				return
+			except TypeError:
+				# Compatibilità con versioni PEFT che non espongono ancora l'arg.
+				model.save_pretrained(
+					output_dir,
+					state_dict=state_dict,
+					safe_serialization=self.args.save_safetensors,
+				)
+				return
+
+		return super()._save(output_dir, state_dict=state_dict)
+
 warnings.filterwarnings("ignore")
 
 DEFAULT_CHECKPOINT = "facebook/mms-1b-all"
@@ -543,7 +581,7 @@ def train_mms_1b(
 		remove_unused_columns=False,
 	)
 
-	trainer = Trainer(
+	trainer = _PeftSafeSaveTrainer(
 		model=model,
 		args=training_args,
 		train_dataset=train_ds,
@@ -555,11 +593,13 @@ def train_mms_1b(
 
 	checkpoint = None
 	if resume:
-		checkpoints = list(Path(output_dir).glob("checkpoint-*"))
+		checkpoints = [p for p in Path(output_dir).glob("checkpoint-*") if (p / "trainer_state.json").exists()]
 		if checkpoints:
 			checkpoints = sorted(checkpoints, key=lambda x: int(x.name.split("-")[1]))
 			checkpoint = str(checkpoints[-1])
 			print(f"\n🔄 Resuming from: {checkpoint}")
+		else:
+			print("\nℹ️  --resume richiesto, ma non trovo checkpoint completi (trainer_state.json).")
 
 	print("\n🚀 Starting training...")
 	trainer.train(resume_from_checkpoint=checkpoint)

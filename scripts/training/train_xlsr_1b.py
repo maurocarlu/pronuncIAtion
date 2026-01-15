@@ -7,7 +7,7 @@ Linee guida:
 - Vocab custom: data/processed/vocab.json
 - Tokenizer: bos_token=None, eos_token=None
 - Memoria: fp16=True, gradient_checkpointing=True
-- Hyperparams: learning_rate=3e-5, warmup_ratio=0.1, gradient_accumulation_steps=4
+- Hyperparams: learning_rate=1e-5, warmup_ratio=0.2, gradient_accumulation_steps=4
 - Stabilità CTC: ctc_zero_infinity=True + re-init lm_head (fp16 mode)
 - Monitoring: PredictionMonitorCallback ogni 100 step
 
@@ -39,6 +39,44 @@ from transformers import (
     Wav2Vec2CTCTokenizer,
     Wav2Vec2Processor,
 )
+
+
+class _PeftSafeSaveTrainer(Trainer):
+    """Trainer che evita crash PEFT su Wav2Vec2 durante il salvataggio.
+
+    PEFT (versioni recenti) durante `save_pretrained()` prova a salvare anche
+    gli embedding layers e chiama `get_input_embeddings()`. I modelli Wav2Vec2
+    non lo implementano, quindi il checkpoint fallisce.
+
+    Workaround: se il modello è un PeftModel, salva l'adapter con
+    `save_embedding_layers=False`.
+    """
+
+    def _save(self, output_dir: Optional[str] = None, state_dict=None):
+        output_dir = output_dir or self.args.output_dir
+        os.makedirs(output_dir, exist_ok=True)
+
+        model = self.model
+        is_peft_model = hasattr(model, "peft_config")
+        if is_peft_model:
+            try:
+                model.save_pretrained(
+                    output_dir,
+                    state_dict=state_dict,
+                    safe_serialization=self.args.save_safetensors,
+                    save_embedding_layers=False,
+                )
+                return
+            except TypeError:
+                # Compatibilità con versioni PEFT che non espongono ancora l'arg.
+                model.save_pretrained(
+                    output_dir,
+                    state_dict=state_dict,
+                    safe_serialization=self.args.save_safetensors,
+                )
+                return
+
+        return super()._save(output_dir, state_dict=state_dict)
 
 warnings.filterwarnings("ignore")
 
@@ -219,12 +257,13 @@ def train_xlsr_1b(
     batch_size: int = 2,
     eval_batch_size: Optional[int] = None,
     max_samples: Optional[int] = None,
-    learning_rate: float = 3e-5,
-    warmup_ratio: float = 0.1,
+    learning_rate: float = 1e-5,
+    warmup_ratio: float = 0.2,
     gradient_accumulation_steps: int = 4,
     max_audio_seconds: Optional[float] = 12.0,
     truncate_audio: bool = True,
     group_by_length: bool = True,
+    disable_spec_augment: bool = False,
     freeze_backbone: bool = False,
     optim: Optional[str] = None,
     load_in_8bit: bool = False,
@@ -320,6 +359,21 @@ def train_xlsr_1b(
             force_download=force_download,
             **model_kwargs,
         )
+
+    # SpecAugment può causare blank-collapse nelle prime epoche in alcuni setup.
+    # Se serve, disabilitalo per stabilizzare (specialmente con batch piccolo / QLoRA).
+    if disable_spec_augment:
+        try:
+            model.config.apply_spec_augment = False
+        except Exception:
+            pass
+        # Extra safety: porta a zero le prob, così anche se apply_spec_augment viene ignorato,
+        # non viene mascherato nulla.
+        try:
+            model.config.mask_time_prob = 0.0
+            model.config.mask_feature_prob = 0.0
+        except Exception:
+            pass
 
     try:
         model.config.use_cache = False
@@ -539,7 +593,7 @@ def train_xlsr_1b(
         remove_unused_columns=False,
     )
 
-    trainer = Trainer(
+    trainer = _PeftSafeSaveTrainer(
         model=model,
         args=training_args,
         train_dataset=train_ds,
@@ -551,11 +605,15 @@ def train_xlsr_1b(
 
     checkpoint = None
     if resume:
-        checkpoints = list(Path(output_dir).glob("checkpoint-*"))
+        checkpoints = [
+            p for p in Path(output_dir).glob("checkpoint-*") if (p / "trainer_state.json").exists()
+        ]
         if checkpoints:
             checkpoints = sorted(checkpoints, key=lambda x: int(x.name.split("-")[1]))
             checkpoint = str(checkpoints[-1])
             print(f"\n🔄 Resuming from: {checkpoint}")
+        else:
+            print("\nℹ️  --resume richiesto, ma non trovo checkpoint completi (trainer_state.json).")
 
     print("\n🚀 Starting training...")
     print("   (Nota: a fine epoca Trainer lancia evaluation + save; può sembrare un 'blocco' per 1-3 minuti)")
@@ -587,8 +645,18 @@ def main():
         default=None,
         help="Limita il numero di sample (train e val) per sanity run veloci. Esempio: --max-samples 200",
     )
-    parser.add_argument("--learning-rate", type=float, default=3e-5)
-    parser.add_argument("--warmup-ratio", type=float, default=0.1)
+    parser.add_argument(
+        "--learning-rate",
+        type=float,
+        default=1e-5,
+        help="Learning rate (default più conservativo per ridurre blank-collapse su 1B).",
+    )
+    parser.add_argument(
+        "--warmup-ratio",
+        type=float,
+        default=0.2,
+        help="Warmup ratio (default più alto per stabilità CTC su 1B).",
+    )
     parser.add_argument("--gradient-accumulation-steps", type=int, default=4)
     parser.add_argument(
         "--max-audio-seconds",
@@ -605,6 +673,11 @@ def main():
         "--no-group-by-length",
         action="store_true",
         help="Disabilita bucketing per lunghezza (può aumentare padding e memoria).",
+    )
+    parser.add_argument(
+        "--no-spec-augment",
+        action="store_true",
+        help="Disabilita SpecAugment (può aiutare se vedi predizioni blank persistenti / CER=1.0).",
     )
     parser.add_argument(
         "--load-in-8bit",
@@ -658,6 +731,7 @@ def main():
         max_audio_seconds=max_audio_seconds,
         truncate_audio=(not args.no_truncate_audio),
         group_by_length=(not args.no_group_by_length),
+        disable_spec_augment=args.no_spec_augment,
         freeze_backbone=args.freeze_backbone,
         optim=args.optim,
         load_in_8bit=args.load_in_8bit,
