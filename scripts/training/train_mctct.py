@@ -163,9 +163,16 @@ def _reinit_ctc_head(head: nn.Module, std: float = 0.02) -> None:
 class PredictionMonitorCallback(TrainerCallback):
     """Stampa predizione esempio ogni N step per monitorare blank collapse."""
 
-    def __init__(self, tokenizer: Wav2Vec2CTCTokenizer, eval_dataset, print_every: int = 100):
+    def __init__(
+        self,
+        tokenizer: Wav2Vec2CTCTokenizer,
+        eval_dataset,
+        feature_extractor,
+        print_every: int = 100,
+    ):
         self.tokenizer = tokenizer
         self.eval_dataset = eval_dataset
+        self.feature_extractor = feature_extractor
         self.print_every = print_every
 
     def on_step_end(self, args, state, control, model=None, **kwargs):
@@ -177,7 +184,14 @@ class PredictionMonitorCallback(TrainerCallback):
         try:
             model.eval()
             sample = self.eval_dataset[0]
-            input_features = torch.tensor([sample["input_features"]], device=next(model.parameters()).device)
+
+            feats = np.asarray(sample["input_features"], dtype=np.float32)
+            padded = self.feature_extractor.pad(
+                [{"input_features": feats}],
+                padding="longest",
+                return_tensors="pt",
+            )
+            input_features = padded["input_features"].to(next(model.parameters()).device)
 
             with torch.no_grad():
                 out = model(input_features=input_features)
@@ -215,9 +229,22 @@ class DataCollatorCTCWithPadding:
     def __init__(self, processor, padding: str = "longest"):
         self.processor = processor
         self.padding = padding
+        try:
+            self.feature_size = getattr(self.processor.feature_extractor, "feature_size", None)
+            if self.feature_size is None:
+                self.feature_size = getattr(self.processor.feature_extractor, "n_mels", None)
+        except Exception:
+            self.feature_size = None
 
     def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
-        input_features = [{"input_features": f["input_features"]} for f in features]
+        input_features = []
+        for f in features:
+            feats = np.asarray(f["input_features"], dtype=np.float32)
+            if feats.ndim == 2 and self.feature_size is not None:
+                # Pad si aspetta [time, feature_size]. Se arrivano [feature_size, time], trasponiamo.
+                if feats.shape[0] == self.feature_size and feats.shape[1] != self.feature_size:
+                    feats = feats.T
+            input_features.append({"input_features": feats})
         label_features = [{"input_ids": f["labels"]} for f in features]
 
         batch = self.processor.feature_extractor.pad(
@@ -386,17 +413,18 @@ def train_mctct(
         processed = processor(audio, sampling_rate=16000, return_tensors="np")
         feats = _extract_input_features(processed)
 
-        # Normalizza orientamento: preferiamo [feature_size, time] (stile Whisper/feature_extractor.pad)
+        # Normalizza orientamento: feature_extractor.pad si aspetta [time, feature_size]
         feats = np.asarray(feats, dtype=np.float32)
         if feats.ndim == 3 and feats.shape[0] == 1:
             feats = feats[0]
         if feats.ndim == 2 and feature_size is not None:
-            if feats.shape[0] != feature_size and feats.shape[1] == feature_size:
+            # Se arriva [feature_size, time], trasponi in [time, feature_size]
+            if feats.shape[0] == feature_size and feats.shape[1] != feature_size:
                 feats = feats.T
         feats = feats.tolist()
 
         labels = tokenizer(batch["ipa_clean"]).input_ids
-        input_length = int(len(feats[0])) if isinstance(feats, list) and feats and isinstance(feats[0], list) else 0
+        input_length = int(len(feats)) if isinstance(feats, list) and feats and isinstance(feats[0], list) else 0
         return {"input_features": feats, "labels": labels, "input_length": input_length}
 
     cols = [c for c in train_ds.column_names if c not in ["audio_path", "ipa_clean"]]
@@ -470,7 +498,7 @@ def train_mctct(
         eval_dataset=val_ds,
         data_collator=DataCollatorCTCWithPadding(processor),
         compute_metrics=compute_metrics,
-        callbacks=[PredictionMonitorCallback(tokenizer, val_ds, print_every=100)],
+        callbacks=[PredictionMonitorCallback(tokenizer, val_ds, processor.feature_extractor, print_every=100)],
     )
 
     checkpoint = None

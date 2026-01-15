@@ -235,17 +235,40 @@ class DataCollatorCTCWithPadding:
         self.processor = processor
         self.input_key = input_key
         self.padding = padding
+        try:
+            self.feature_size = getattr(self.processor.feature_extractor, "feature_size", None)
+            if self.feature_size is None:
+                self.feature_size = getattr(self.processor.feature_extractor, "n_mels", None)
+        except Exception:
+            self.feature_size = None
 
     def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
         if self.input_key == "input_features":
-            audio = [np.asarray(f["input_values"], dtype=np.float32) for f in features]
-            batch = self.processor.feature_extractor(
-                audio,
-                sampling_rate=16000,
-                padding=self.padding,
-                return_tensors="pt",
-            )
-            # Manteniamo fp32: la CTC head è fp32 (e fp16 può causare mismatch input/bias nel logging).
+            # Due modalità:
+            # - on-the-fly: dataset contiene input_values (waveform) e qui estraiamo input_features
+            # - precomputed: dataset contiene input_features e qui facciamo solo pad
+            if "input_values" in features[0]:
+                audio = [np.asarray(f["input_values"], dtype=np.float32) for f in features]
+                batch = self.processor.feature_extractor(
+                    audio,
+                    sampling_rate=16000,
+                    padding=self.padding,
+                    return_tensors="pt",
+                )
+            else:
+                input_features = []
+                for f in features:
+                    feats = np.asarray(f["input_features"], dtype=np.float32)
+                    if feats.ndim == 2 and self.feature_size is not None:
+                        # Pad si aspetta [time, feature_size]. Se arrivano [feature_size, time], trasponiamo.
+                        if feats.shape[0] == self.feature_size and feats.shape[1] != self.feature_size:
+                            feats = feats.T
+                    input_features.append({"input_features": feats})
+                batch = self.processor.feature_extractor.pad(
+                    input_features,
+                    padding=self.padding,
+                    return_tensors="pt",
+                )
         else:
             input_features = [{self.input_key: f[self.input_key]} for f in features]
             batch = self.processor.feature_extractor.pad(
@@ -317,6 +340,14 @@ def train_parakeet(
 
     input_key = _detect_model_input_key(processor)
     print(f"   Model input key: {input_key}")
+
+    feature_size = None
+    try:
+        feature_size = getattr(processor.feature_extractor, "feature_size", None)
+        if feature_size is None:
+            feature_size = getattr(processor.feature_extractor, "n_mels", None)
+    except Exception:
+        feature_size = None
 
     # Per Parakeet il processor produce spesso input_features (mel). Precomputarle e serializzarle
     # come liste annidate è molto lento. Default: calcolo feature on-the-fly nel collator.
@@ -423,8 +454,14 @@ def train_parakeet(
         else:
             processed = processor(audio, sampling_rate=16000, return_tensors=None)
             x = _extract_first_key(processed, (input_key,))
-            if hasattr(x, "tolist"):
-                x = x.tolist()
+            x = np.asarray(x, dtype=np.float32)
+            if x.ndim == 3 and x.shape[0] == 1:
+                x = x[0]
+            if input_key == "input_features" and x.ndim == 2 and feature_size is not None:
+                # Normalizza orientamento: [time, feature_size]
+                if x.shape[0] == feature_size and x.shape[1] != feature_size:
+                    x = x.T
+            x = x.tolist()
 
         labels = tokenizer(batch["ipa_clean"]).input_ids
 
@@ -492,7 +529,7 @@ def train_parakeet(
         if not valid:
             return {"cer": 1.0}
         preds, labels2 = zip(*valid)
-        return {"cer": cer_metric.compute(predictions=preds, references=labels2)}
+        return {"cer": _compute_cer(predictions=list(preds), references=list(labels2))}
 
     # NOTE: Transformers Trainer (versioni recenti) blocca il training su modelli puramente quantizzati.
     # Qui facciamo un training loop PyTorch che allena SOLO la ctc_head (linear probing) mantenendo 4-bit sul backbone.
@@ -554,9 +591,26 @@ def train_parakeet(
             model.eval()
             sample = val_ds[0]
             if input_key == "input_features":
-                audio = np.asarray(sample[dataset_input_key], dtype=np.float32)
-                feats = processor.feature_extractor([audio], sampling_rate=16000, padding=True, return_tensors="pt")
-                x = feats["input_features"].to(device=device, dtype=torch.float16)
+                if dataset_input_key == "input_values":
+                    audio = np.asarray(sample[dataset_input_key], dtype=np.float32)
+                    feats = processor.feature_extractor(
+                        [audio],
+                        sampling_rate=16000,
+                        padding=True,
+                        return_tensors="pt",
+                    )
+                    x = feats["input_features"].to(device=device, dtype=torch.float16)
+                else:
+                    feats = np.asarray(sample["input_features"], dtype=np.float32)
+                    if feats.ndim == 2 and feature_size is not None:
+                        if feats.shape[0] == feature_size and feats.shape[1] != feature_size:
+                            feats = feats.T
+                    padded = processor.feature_extractor.pad(
+                        [{"input_features": feats}],
+                        padding="longest",
+                        return_tensors="pt",
+                    )
+                    x = padded["input_features"].to(device=device, dtype=torch.float16)
                 out = model(input_features=x)
             else:
                 x = torch.tensor([sample[dataset_input_key]], device=device)
