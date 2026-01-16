@@ -10,8 +10,8 @@ Linee guida:
 - Tokenizer: bos_token=None, eos_token=None
 - Inizializzazione: re-init lm_head (std=0.02) + ignore_mismatched_sizes=True
 - Stabilità CTC: ctc_zero_infinity=True
-- Memoria: fp16=True, gradient_checkpointing=True
-- Hyperparams: learning_rate=3e-5, warmup_ratio=0.1, gradient_accumulation_steps=4
+- Memoria: fp16/bf16, gradient_checkpointing=True
+- Hyperparams: learning_rate=1e-5, warmup_ratio=0.2, gradient_accumulation_steps=4
 - Monitoring: PredictionMonitorCallback ogni 100 step
 - Validazione/checkpoint: a fine epoca (CER locale)
 
@@ -194,7 +194,13 @@ class PredictionMonitorCallback(TrainerCallback):
             input_features = padded["input_features"].to(next(model.parameters()).device)
 
             with torch.no_grad():
-                out = model(input_features=input_features)
+                use_bf16 = bool(
+                    torch.cuda.is_available()
+                    and getattr(torch.cuda, "is_bf16_supported", lambda: False)()
+                )
+                amp_dtype = torch.bfloat16 if use_bf16 else torch.float16
+                with torch.cuda.amp.autocast(enabled=torch.cuda.is_available(), dtype=amp_dtype):
+                    out = model(input_features=input_features)
                 logits = out.logits if hasattr(out, "logits") else out["logits"]
 
             pred_ids = torch.argmax(logits, dim=-1)[0]
@@ -268,8 +274,9 @@ def train_mctct(
     epochs: int = 10,
     batch_size: int = 2,
     eval_batch_size: Optional[int] = None,
-    learning_rate: float = 3e-5,
-    warmup_ratio: float = 0.1,
+    # Allineato a XLS-R 1B: LR più conservativo + warmup più lungo riducono blank-collapse.
+    learning_rate: float = 1e-5,
+    warmup_ratio: float = 0.2,
     gradient_accumulation_steps: int = 4,
     group_by_length: bool = True,
     max_audio_seconds: Optional[float] = None,
@@ -359,7 +366,7 @@ def train_mctct(
         checkpoint,
         force_download=force_download,
         token=hf_token,
-        torch_dtype=torch_dtype,
+        dtype=torch_dtype,
         **model_kwargs,
     )
     ctc_head = _get_ctc_head(model)
@@ -435,7 +442,12 @@ def train_mctct(
 
         labels = tokenizer(batch["ipa_clean"]).input_ids
         input_length = int(len(feats)) if isinstance(feats, list) and feats and isinstance(feats[0], list) else 0
-        return {"input_features": feats, "labels": labels, "input_length": input_length}
+        return {
+            "input_features": feats,
+            "labels": labels,
+            "input_length": input_length,
+            "label_length": int(len(labels)) if labels is not None else 0,
+        }
 
     cols = [c for c in train_ds.column_names if c not in ["audio_path", "ipa_clean"]]
     train_ds = train_ds.remove_columns(cols)
@@ -457,11 +469,23 @@ def train_mctct(
         keep_in_memory=keep_in_memory,
     )
 
-    train_ds = train_ds.filter(lambda x: x.get("input_length", 0) > 0, load_from_cache_file=False)
-    val_ds = val_ds.filter(lambda x: x.get("input_length", 0) > 0, load_from_cache_file=False)
+    # Coerente con gli altri trainer CTC del repo: filtra esempi che violano i vincoli CTC
+    # (labels troppo lunghe rispetto ai frame disponibili).
+    train_ds = train_ds.filter(
+        lambda x: x.get("input_length", 0) > 0
+        and x.get("label_length", 0) > 0
+        and x.get("label_length", 0) < x.get("input_length", 0),
+        load_from_cache_file=False,
+    )
+    val_ds = val_ds.filter(
+        lambda x: x.get("input_length", 0) > 0
+        and x.get("label_length", 0) > 0
+        and x.get("label_length", 0) < x.get("input_length", 0),
+        load_from_cache_file=False,
+    )
 
-    train_ds.set_format(type=None, columns=["input_features", "labels", "input_length"])
-    val_ds.set_format(type=None, columns=["input_features", "labels", "input_length"])
+    train_ds.set_format(type=None, columns=["input_features", "labels", "input_length", "label_length"])
+    val_ds.set_format(type=None, columns=["input_features", "labels", "input_length", "label_length"])
 
     def compute_metrics(pred):
         pred_ids = np.argmax(pred.predictions, axis=-1)
@@ -557,8 +581,8 @@ def main():
         default=None,
         help="Batch size per eval (default: uguale a --batch-size). Riducilo se vai in OOM durante eval/save.",
     )
-    parser.add_argument("--learning-rate", type=float, default=3e-5)
-    parser.add_argument("--warmup-ratio", type=float, default=0.1)
+    parser.add_argument("--learning-rate", type=float, default=1e-5)
+    parser.add_argument("--warmup-ratio", type=float, default=0.2)
     parser.add_argument("--gradient-accumulation-steps", type=int, default=4)
 
     parser.add_argument(

@@ -290,8 +290,9 @@ def train_parakeet(
     batch_size: int = 1,
     max_samples: Optional[int] = None,
     precompute_features: bool = False,
-    learning_rate: float = 3e-5,
-    warmup_ratio: float = 0.1,
+    # LR più conservativo + warmup più lungo riducono blank-collapse su CTC.
+    learning_rate: float = 1e-5,
+    warmup_ratio: float = 0.2,
     gradient_accumulation_steps: int = 4,
     resume: bool = False,
     force_download: bool = False,
@@ -461,24 +462,27 @@ def train_parakeet(
 
         labels = tokenizer(batch["ipa_clean"]).input_ids
 
-        # Heuristic per evitare crash CTC se labels troppo lunghe
+        # Stima lunghezza per CTC (frame/time steps) per evitare instabilità/NaN.
+        # Nota: quando usiamo feature extraction on-the-fly (dataset_input_key="input_values")
+        # la variabile `x` è waveform (campioni), ma il modello vede input_features (frame).
         if input_key == "input_values":
-            approx_frames = int(len(x) // 320)
-            if len(labels) > approx_frames:
-                labels = labels[:approx_frames]
-        elif input_key == "input_features":
-            # tipicamente [T, F]
-            try:
-                t = len(x)
-                if len(labels) > t:
-                    labels = labels[:t]
-            except Exception:
-                pass
+            ctc_frames = int(len(x) // 320)
+        else:
+            if dataset_input_key == "input_values":
+                # Approx come negli altri trainer waveform->frame (20ms stride @16kHz)
+                ctc_frames = int(len(audio) // 320)
+            else:
+                # `x` contiene già input_features tipicamente [T, F]
+                ctc_frames = int(len(x)) if hasattr(x, "__len__") else 0
+
+        if ctc_frames > 0 and len(labels) > ctc_frames:
+            labels = labels[:ctc_frames]
 
         return {
             dataset_input_key: x,
             "labels": labels,
-            "input_length": len(x) if hasattr(x, "__len__") else 0,
+            # Salviamo direttamente i frame CTC stimati (non i campioni raw)
+            "input_length": ctc_frames,
             "label_length": len(labels),
         }
 
@@ -502,13 +506,18 @@ def train_parakeet(
         keep_in_memory=True,
     )
 
+    # Coerente con gli altri trainer CTC del repo: filtra esempi non validi per CTC.
     train_ds = train_ds.filter(
-        lambda x: x["label_length"] > 0,
+        lambda x: x.get("input_length", 0) > 0
+        and x.get("label_length", 0) > 0
+        and x.get("label_length", 0) < x.get("input_length", 0),
         load_from_cache_file=False,
         keep_in_memory=True,
     )
     val_ds = val_ds.filter(
-        lambda x: x["label_length"] > 0,
+        lambda x: x.get("input_length", 0) > 0
+        and x.get("label_length", 0) > 0
+        and x.get("label_length", 0) < x.get("input_length", 0),
         load_from_cache_file=False,
         keep_in_memory=True,
     )
@@ -642,6 +651,15 @@ def train_parakeet(
                 out = model(**batch)
                 loss = out.loss
 
+            # Evita di propagare NaN/Inf (tipico quando qualche batch viola vincoli CTC).
+            if not torch.isfinite(loss).all():
+                print(
+                    f"\n⚠️ Non-finite loss (NaN/Inf) a epoch={epoch} step_idx={step_idx}. "
+                    "Skipping batch (stabilità CTC)."
+                )
+                optimizer.zero_grad(set_to_none=True)
+                continue
+
             loss_to_backprop = loss / max(1, gradient_accumulation_steps)
             scaler.scale(loss_to_backprop).backward()
             running_loss += float(loss.detach().cpu())
@@ -719,8 +737,8 @@ def main():
         action="store_true",
         help="Precalcola e salva input_features nel dataset (più lento nel preprocessing, ma evita recompute ad ogni epoca).",
     )
-    parser.add_argument("--learning-rate", type=float, default=3e-5)
-    parser.add_argument("--warmup-ratio", type=float, default=0.1)
+    parser.add_argument("--learning-rate", type=float, default=1e-5)
+    parser.add_argument("--warmup-ratio", type=float, default=0.2)
     parser.add_argument("--gradient-accumulation-steps", type=int, default=4)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument(
