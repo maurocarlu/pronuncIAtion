@@ -160,6 +160,7 @@ def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bo
     is_mms_model = False
     is_data2vec2_model = False
     is_hubert_model = False
+    is_distilhubert_model = False
     is_mctct_model = False
     is_parakeet_model = False
     is_speechtokenizer = False
@@ -209,6 +210,9 @@ def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bo
         is_hubert_model = config.get("model_type") == "hubert" or \
                           "hubert" in config.get("architectures", [""])[0].lower() or \
                           "hubert" in str(config.get("_name_or_path", "")).lower()
+
+        # DistilHuBERT: stesso loader di HuBERT (HubertForCTC), ma utile per logging/detection.
+        is_distilhubert_model = "distilhubert" in name0 or "distilhubert" in arch0
     else:
         print(f"   ⚠️ WARNING: Config file not found at {config_path}")
         # Fallback detection from path string
@@ -221,6 +225,10 @@ def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bo
         elif "w2v-bert" in path_str or "w2v_bert" in path_str:
             print(f"   ℹ️ Detected 'w2v-bert' in path.")
             is_w2v_bert = True
+        elif "distilhubert" in path_str:
+            print(f"   ℹ️ Detected 'distilhubert' in path.")
+            is_distilhubert_model = True
+            is_hubert_model = True
         elif "parakeet" in path_str:
             print(f"   ℹ️ Detected 'parakeet' in path.")
             is_parakeet_model = True
@@ -283,7 +291,22 @@ def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bo
         from transformers import Wav2Vec2BertProcessor
         processor = Wav2Vec2BertProcessor.from_pretrained(model_path)
     else:
-        processor = Wav2Vec2Processor.from_pretrained(model_path)
+        try:
+            processor = Wav2Vec2Processor.from_pretrained(model_path)
+        except Exception:
+            # Fallback robusto: tokenizer dal folder + feature_extractor dal checkpoint base.
+            # Utile per modelli HuBERT/DistilHuBERT se manca parte della config del processor.
+            if is_hubert_model or is_distilhubert_model:
+                from transformers import Wav2Vec2CTCTokenizer, Wav2Vec2FeatureExtractor
+
+                tokenizer = Wav2Vec2CTCTokenizer.from_pretrained(model_path)
+                base_ckpt = config.get("_name_or_path") or (
+                    "ntu-spml/distilhubert" if is_distilhubert_model else "facebook/hubert-large-ls960-ft"
+                )
+                feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(base_ckpt)
+                processor = Wav2Vec2Processor(feature_extractor=feature_extractor, tokenizer=tokenizer)
+            else:
+                raise
     
     if is_baseline_mlp:
         print("   Tipo: BaselineMLPForCTC (Linear Probe)")
@@ -448,7 +471,10 @@ def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bo
             model = Wav2Vec2ForCTC.from_pretrained(model_path)
         
     elif is_hubert_model:
-        print("   Tipo: HubertForCTC")
+        if is_distilhubert_model:
+            print("   Tipo: DistilHuBERT (HubertForCTC)")
+        else:
+            print("   Tipo: HubertForCTC")
         from transformers import HubertForCTC
         model = HubertForCTC.from_pretrained(model_path)
         

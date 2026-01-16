@@ -35,6 +35,32 @@ HuBERT impara mappando l'audio continuo a cluster discreti. Questo forza il mode
 
 ---
 
+## 2b. DistilHuBERT ⭐ NEW
+
+| Parametro | Valore |
+|-----------|--------|
+| **Backbone** | `ntu-spml/distilhubert` |
+| **Parametri** | ~75% in meno vs HuBERT Large (distillazione) |
+| **Input** | Raw Waveform (16kHz) |
+| **Head** | CTC (`HubertForCTC`) |
+
+### Caratteristiche
+DistilHuBERT applica **Knowledge Distillation** per ottenere un encoder più leggero e veloce, cercando di mantenere le feature fonetiche utili per il task.
+
+**Motivazione**: verificare se una compressione importante del backbone (≈75% parametri in meno) mantiene performance competitive su SpeechOcean762.
+
+### Note di Implementazione
+- **Vocab custom**: `data/processed/vocab.json`
+- **Tokenizer**: `Wav2Vec2CTCTokenizer` con `bos_token=None`, `eos_token=None`
+- **Stabilità CTC**: `ctc_zero_infinity=True` + re-init `lm_head` (std=0.02)
+- **Memoria**: `fp16=True`, `gradient_checkpointing=True`
+- **Monitoring**: `PredictionMonitorCallback` ogni 100 step
+
+### Script
+Vedi `scripts/training/train_distilhubert.py`.
+
+---
+
 ## 3. XLS-R (300M)
 
 | Parametro | Valore |

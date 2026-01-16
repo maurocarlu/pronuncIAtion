@@ -12,6 +12,7 @@ Per dettagli sulle metriche, vedi **[docs/BENCHMARK_GUIDE.md](docs/BENCHMARK_GUI
 | Modello | Input Type | Task A (PER) ↓ | Task B (Pearson) ↑ | Task C (AUC) ↑ | Note |
 |---------|------------|----------------|-------------------|----------------|------|
 | **HuBERT Large** | Raw Waveform | **8.84%** | **0.5932** | 0.8426 | **🏆 Best Overall** |
+| DistilHuBERT | Raw Waveform | TBD | TBD | TBD | Distillazione vs HuBERT Large (≈75% params in meno) |
 | WavLM Base | Raw Waveform | 14.91% | 0.5550 | 0.8369 | Baseline fine-tuned |
 | WavLM Large | Raw Waveform | 17.91% | 0.5736 | 0.8382 | Standard CTC |
 | Baseline MLP | Raw Waveform | 25.92% | 0.5754 | 0.8427 | Linear Probe |
@@ -32,6 +33,11 @@ Per dettagli sulle metriche, vedi **[docs/BENCHMARK_GUIDE.md](docs/BENCHMARK_GUI
 ---
 
 ## 📅 Log Esperimenti
+
+### [Planned] DistilHuBERT vs HuBERT Large (Knowledge Distillation)
+- **Motivazione scientifica**: Valutazione dell'efficacia della distillazione (≈75% di parametri in meno) rispetto al backbone HuBERT Large nel task di Phoneme Recognition.
+- **Checkpoint**: `ntu-spml/distilhubert`
+- **Script**: `scripts/training/train_distilhubert.py`
 
 ### [26/12/2024] Benchmark SpeechTokenizer
 - **Config**: HuBERT encoder (frozen) → RVQ (8 layers) → Classificatore Transformer (2 layers).
@@ -69,6 +75,7 @@ Per dettagli sulle metriche, vedi **[docs/BENCHMARK_GUIDE.md](docs/BENCHMARK_GUI
 | **Early Fusion** | 1e-4 | 2 | 5 | **Frozen+CTC** | `train_early_fusion.py` |
 | **Wav2Vec2 Phoneme (lv60-pmp)** | **3e-5** | 4 | 10 | Fine-tuning (domain init) | `train_wav2vec2_phoneme.py` |
 | **Data2Vec2 Large** | **3e-5** | 4 | 10 | Fine-tuning (CTC) | `train_data2vec2.py` |
+| **DistilHuBERT** | **3e-5** | 4 | 10 | Fine-tuning (CTC) | `train_distilhubert.py` |
 | **XLS-R 1B** | **3e-5** | 1 | 10 | Fine-tuning / QLoRA (CTC) | `train_xlsr_1b.py` |
 | **MMS-1B** | **3e-5** | 1 | 10 | Fine-tuning / QLoRA (CTC) | `train_mms_1b.py` |
 | **M-CTC-T (Meta)** | **3e-5** | 1-2 | 10 | Fine-tuning (CTC) | `train_mctct.py` |
@@ -134,6 +141,7 @@ Combinazione dei due top-performer a livello logit:
 16. **Late Fusion HuBERT+WavLM** (`evaluate_hubert_fusion.py`) - 🆕 NEW
 17. **Early Fusion Multi-Backbone** (`train_early_fusion.py`) - 🆕 NEW
 18. **Parakeet-CTC 1.1B** (`train_parakeet.py`) - 🆕 NEW
+19. **DistilHuBERT** (`train_distilhubert.py`) - 🆕 NEW
 
 ---
 
