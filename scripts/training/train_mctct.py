@@ -342,14 +342,24 @@ def train_mctct(
     if long_audio_policy not in {"truncate", "drop"}:
         raise ValueError("long_audio_policy deve essere 'truncate' o 'drop'")
 
-    dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+    use_bf16 = bool(torch.cuda.is_available() and getattr(torch.cuda, "is_bf16_supported", lambda: False)())
+    use_fp16 = bool(torch.cuda.is_available() and not use_bf16)
+
+    # Regola importante:
+    # - se usi fp16 nel Trainer, NON caricare i pesi del modello in fp16, altrimenti puoi ottenere
+    #   grads fp16 e GradScaler/Accelerate può fallire con: "Attempting to unscale FP16 gradients".
+    # - su A100 (Kaggle) bf16 è supportato e spesso più stabile (senza GradScaler).
+    if use_bf16:
+        torch_dtype = torch.bfloat16
+    else:
+        torch_dtype = torch.float32
 
     print("\n📦 Loading M-CTC-T...")
     model = model_loader(
         checkpoint,
         force_download=force_download,
         token=hf_token,
-        dtype=dtype,
+        torch_dtype=torch_dtype,
         **model_kwargs,
     )
     ctc_head = _get_ctc_head(model)
@@ -480,8 +490,8 @@ def train_mctct(
         load_best_model_at_end=True,
         metric_for_best_model="cer",
         greater_is_better=False,
-        fp16=True,
-        bf16=False,
+        fp16=use_fp16,
+        bf16=use_bf16,
         dataloader_num_workers=0,
         group_by_length=group_by_length,
         length_column_name="input_length",

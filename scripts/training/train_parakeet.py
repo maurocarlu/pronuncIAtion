@@ -196,17 +196,13 @@ class PredictionMonitorCallback(TrainerCallback):
                     padding=True,
                     return_tensors="pt",
                 )
-                # In questo script la CTC head è forzata in fp32; usare input fp32 evita mismatch input(fp16)/bias(fp32).
-                x = feats["input_features"].to(device=device, dtype=torch.float32)
+                # Esegui come nel training: input fp16 + AMP autocast per evitare mismatch dtype nel bias.
+                x = feats["input_features"].to(device=device, dtype=torch.float16)
             else:
                 x = torch.tensor([sample[self.dataset_input_key]], device=device)
 
             with torch.no_grad():
-                # Evita autocast ereditato dal loop di training quando fp16 è attivo.
-                if torch.cuda.is_available():
-                    with torch.cuda.amp.autocast(enabled=False):
-                        out = model(**{self.input_key: x})
-                else:
+                with torch.cuda.amp.autocast(enabled=torch.cuda.is_available(), dtype=torch.float16):
                     out = model(**{self.input_key: x})
                 logits = out.logits if hasattr(out, "logits") else out["logits"]
 
@@ -611,10 +607,12 @@ def train_parakeet(
                         return_tensors="pt",
                     )
                     x = padded["input_features"].to(device=device, dtype=torch.float16)
-                out = model(input_features=x)
+                with torch.cuda.amp.autocast(enabled=torch.cuda.is_available(), dtype=torch.float16):
+                    out = model(input_features=x)
             else:
                 x = torch.tensor([sample[dataset_input_key]], device=device)
-                out = model(input_values=x)
+                with torch.cuda.amp.autocast(enabled=torch.cuda.is_available(), dtype=torch.float16):
+                    out = model(input_values=x)
             logits = out.logits
             pred = tokenizer.decode(torch.argmax(logits, dim=-1)[0])
             target_ids = [i for i in sample["labels"] if i != -100]
