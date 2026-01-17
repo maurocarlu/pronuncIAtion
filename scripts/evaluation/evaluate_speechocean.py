@@ -151,6 +151,14 @@ def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bo
     print(f"   Modello: {model_path}")
     print(f"   Normalizzazione IPA: {normalizer.mode}")
     print(f"   Dataset completo: {'Sì' if full_dataset else 'No (50 esempi)'}")
+
+    def _is_hf_quantized_model(m: nn.Module) -> bool:
+        return bool(
+            getattr(m, "is_loaded_in_4bit", False)
+            or getattr(m, "is_loaded_in_8bit", False)
+            or getattr(m, "quantization_method", None) is not None
+            or getattr(m, "quantization_config", None) is not None
+        )
     
     # Controlla tipo modello PRIMA di caricare processor
     config_path = Path(model_path) / "config.json"
@@ -400,7 +408,33 @@ def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bo
                 "ParakeetForCTC non disponibile: serve una versione di transformers che includa Parakeet. "
                 "Vedi scripts/training/train_parakeet.py"
             ) from e
-        model = ParakeetForCTC.from_pretrained(model_path)
+        parakeet_kwargs = {}
+        if torch.cuda.is_available():
+            # Il checkpoint Parakeet nel repo viene tipicamente salvato/allenato in 4-bit (bitsandbytes).
+            # Su GPU usiamo device_map='auto' e proviamo a forzare il loader 4-bit.
+            parakeet_kwargs["device_map"] = "auto"
+            try:
+                import bitsandbytes  # noqa: F401
+                from transformers import BitsAndBytesConfig
+
+                parakeet_kwargs["quantization_config"] = BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_quant_type="nf4",
+                    bnb_4bit_compute_dtype=torch.float16,
+                )
+            except Exception:
+                # Se bitsandbytes manca, il load potrebbe comunque funzionare se il modello non è quantizzato.
+                pass
+
+        model = ParakeetForCTC.from_pretrained(model_path, **parakeet_kwargs)
+
+        # Su CPU, un checkpoint 4/8-bit (bitsandbytes) non è valutabile: meglio fallire subito.
+        if _is_hf_quantized_model(model) and not torch.cuda.is_available():
+            print(
+                "\n❌ Il checkpoint Parakeet risulta quantizzato (4/8-bit) e richiede CUDA + bitsandbytes per l'inferenza.\n"
+                "   Soluzione: esegui la valutazione su GPU (Kaggle/Colab) oppure salva un checkpoint FP32 non-quantizzato."
+            )
+            return None
 
     elif is_data2vec2_model:
         print("   Tipo: AutoModelForCTC (Data2Vec2)")
@@ -1212,9 +1246,23 @@ def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bo
                         a = np.pad(a, (0, pad_width), mode='constant')
                     padded_audio.append(a)
                 input_values = torch.tensor(np.stack(padded_audio), dtype=torch.float32)
-                
+
+                device = next(model.parameters()).device
+                param_dtype = next(model.parameters()).dtype
+
+                # Su CPU, evita half/bf16: alcune ops non sono supportate o causano mismatch.
+                if device.type == "cpu" and param_dtype in (torch.float16, torch.bfloat16):
+                    if not _is_hf_quantized_model(model):
+                        model = model.float()
+                    param_dtype = torch.float32
+
+                input_values = input_values.to(device=device, dtype=param_dtype)
+                use_amp = (device.type == "cuda")
+                amp_dtype = param_dtype if param_dtype in (torch.float16, torch.bfloat16) else torch.float16
+
                 with torch.no_grad():
-                    outputs = model(input_values)
+                    with torch.autocast(device_type="cuda", dtype=amp_dtype, enabled=use_amp):
+                        outputs = model(input_values)
                     if isinstance(outputs, dict):
                         logits = outputs["logits"]
                     else:
@@ -1226,12 +1274,25 @@ def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bo
                     return_tensors="pt",
                     padding=True
                 )
-                
+
+                device = next(model.parameters()).device
+                param_dtype = next(model.parameters()).dtype
+
+                # Su CPU, upcast a fp32 per robustezza.
+                if device.type == "cpu" and param_dtype in (torch.float16, torch.bfloat16):
+                    if not _is_hf_quantized_model(model):
+                        model = model.float()
+                    param_dtype = torch.float32
+
+                use_amp = (device.type == "cuda")
+                amp_dtype = param_dtype if param_dtype in (torch.float16, torch.bfloat16) else torch.float16
+
                 with torch.no_grad():
-                    if hasattr(inputs, 'input_features') and inputs.input_features is not None:
-                        outputs = model(inputs.input_features)
-                    else:
-                        outputs = model(inputs.input_values)
+                    with torch.autocast(device_type="cuda", dtype=amp_dtype, enabled=use_amp):
+                        if hasattr(inputs, 'input_features') and inputs.input_features is not None:
+                            outputs = model(inputs.input_features.to(device=device, dtype=param_dtype))
+                        else:
+                            outputs = model(inputs.input_values.to(device=device, dtype=param_dtype))
                     if isinstance(outputs, dict):
                         logits = outputs["logits"]
                     else:
