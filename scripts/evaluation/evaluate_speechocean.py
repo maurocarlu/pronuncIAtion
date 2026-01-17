@@ -12,6 +12,7 @@ consistenza tra training e evaluation.
 
 import argparse
 import sys
+import traceback
 from pathlib import Path
 
 import torch
@@ -110,6 +111,15 @@ def _compute_cer(predictions: list[str], references: list[str]) -> float:
         edits += _levenshtein_distance(p, r)
         chars += len(r)
     return float(edits) / float(max(1, chars))
+
+
+def _get_transformers_version() -> str:
+    try:
+        import transformers
+
+        return str(getattr(transformers, "__version__", "unknown"))
+    except Exception:
+        return "unknown"
 
 
 def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bool = False):
@@ -280,13 +290,20 @@ def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bo
 
     elif is_parakeet_model:
         try:
-            from transformers import ParakeetProcessor
+            from transformers import ParakeetProcessor, Wav2Vec2CTCTokenizer
+        except Exception as e:
+            tf_ver = _get_transformers_version()
+            raise RuntimeError(
+                "ParakeetProcessor non disponibile nella tua installazione di transformers. "
+                f"Transformers version: {tf_ver}.\n"
+                "In Colab/Kaggle: pip install -U transformers accelerate bitsandbytes\n"
+                "(se usi un checkpoint quantizzato 4-bit serve anche CUDA + bitsandbytes)."
+            ) from e
 
+        try:
             processor = ParakeetProcessor.from_pretrained(model_path)
         except Exception:
             # Fallback: come train_parakeet.py (processor base + tokenizer custom)
-            from transformers import ParakeetProcessor, Wav2Vec2CTCTokenizer
-
             tokenizer = Wav2Vec2CTCTokenizer.from_pretrained(model_path)
             base_ckpt = config.get("_name_or_path") or "nvidia/parakeet-ctc-1.1b"
             processor = ParakeetProcessor.from_pretrained(base_ckpt)
@@ -404,8 +421,11 @@ def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bo
         try:
             from transformers import ParakeetForCTC
         except Exception as e:
+            tf_ver = _get_transformers_version()
             raise RuntimeError(
-                "ParakeetForCTC non disponibile: serve una versione di transformers che includa Parakeet. "
+                "ParakeetForCTC non disponibile: serve una versione di transformers che includa Parakeet.\n"
+                f"Transformers version: {tf_ver}.\n"
+                "In Colab/Kaggle: pip install -U transformers accelerate bitsandbytes\n"
                 "Vedi scripts/training/train_parakeet.py"
             ) from e
         parakeet_kwargs = {}
@@ -1086,35 +1106,81 @@ def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bo
     if not is_qwen_audio and not is_whisper_encoder:
         model.eval()
         print("✓ Modello caricato!")
-        
-        # Load dataset for other models (wav2vec, wavlm, hubert, etc.)
-        print("\n📥 Scaricamento SpeechOcean762...")
-        ds = load_dataset("mispeech/speechocean762", split="test")
-        ds = ds.cast_column("audio", Audio(sampling_rate=16000))
-        print(f"✓ Caricati {len(ds)} esempi")
-        
-        def prepare_example(example):
-            example["reference_ipa"] = extract_phones_from_words(example["words"])
-            return example
-        
-        print("\n🔄 Conversione fonemi ARPABET → IPA...")
-        ds = ds.map(prepare_example)
-        ds = ds.filter(lambda x: len(x["reference_ipa"]) > 0)
-        print(f"✓ Esempi validi: {len(ds)}")
-        
-        # Convert to list format for unified processing
-        collected_examples = []
-        for i in range(len(ds)):
-            ex = ds[i]
-            collected_examples.append({
-                "audio": ex["audio"],
-                "reference_ipa": ex["reference_ipa"],
-                "text": ex["text"],
-                "accuracy": ex["accuracy"],
-                "age": ex.get("age", 0),
-                "words": ex["words"],
-            })
-        ds = collected_examples
+
+        # Load dataset for other models (wav2vec, wavlm, hubert, mctct, parakeet, etc.)
+        try:
+            if full_dataset:
+                print("\n📥 Scaricamento FULL SpeechOcean762...")
+                hf_ds = load_dataset("mispeech/speechocean762", split="test")
+                hf_ds = hf_ds.cast_column("audio", Audio(sampling_rate=16000))
+                print(f"✓ Caricati {len(hf_ds)} esempi")
+
+                def prepare_example(example):
+                    example["reference_ipa"] = extract_phones_from_words(example["words"])
+                    return example
+
+                print("\n🔄 Conversione fonemi ARPABET → IPA...")
+                hf_ds = hf_ds.map(prepare_example)
+                hf_ds = hf_ds.filter(lambda x: len(x["reference_ipa"]) > 0)
+                print(f"✓ Esempi validi: {len(hf_ds)}")
+
+                collected_examples = []
+                for i in range(len(hf_ds)):
+                    ex = hf_ds[i]
+                    collected_examples.append({
+                        "audio": ex["audio"],
+                        "reference_ipa": ex["reference_ipa"],
+                        "text": ex["text"],
+                        "accuracy": ex["accuracy"],
+                        "age": ex.get("age", 0),
+                        "words": ex["words"],
+                    })
+                ds = collected_examples
+            else:
+                print("   ⚠️ Modalità MINIMAL (50 esempi). Usa --full per dataset completo.")
+                print("\n📥 Caricamento MINIMAL SpeechOcean762 (streaming)...")
+                ds_iter = iter(load_dataset("mispeech/speechocean762", split="test", streaming=True))
+                collected_examples = []
+                target_count = 50
+
+                for _ in range(2000):
+                    try:
+                        ex = next(ds_iter)
+                    except StopIteration:
+                        break
+
+                    ref_ipa = extract_phones_from_words(ex.get("words", []))
+                    if not ref_ipa:
+                        continue
+
+                    audio_data = ex["audio"]
+                    arr = audio_data["array"]
+                    sr = audio_data.get("sampling_rate", 16000)
+                    if sr != 16000:
+                        import librosa
+
+                        arr = librosa.resample(arr, orig_sr=sr, target_sr=16000)
+
+                    collected_examples.append({
+                        "audio": {"array": arr, "sampling_rate": 16000},
+                        "reference_ipa": ref_ipa,
+                        "text": ex.get("text", ""),
+                        "accuracy": ex.get("accuracy", 0),
+                        "age": ex.get("age", 0),
+                        "words": ex.get("words", []),
+                    })
+                    if len(collected_examples) >= target_count:
+                        break
+
+                ds = collected_examples
+                print(f"✓ Dataset pronto: {len(ds)} esempi")
+        except Exception as e:
+            print("\n❌ Errore nel caricamento di SpeechOcean762 (mispeech/speechocean762).")
+            print("   Cause comuni: connessione, cache HF corrotta, versione datasets/pyarrow, oppure dataset non accessibile.")
+            print("   Suggerimenti rapidi:")
+            print("   - pip install -U datasets pyarrow soundfile librosa")
+            print("   - (se serve) huggingface-cli login")
+            raise
     
     # ==========================================================================
     # PREDIZIONE CON CONFIDENCE SCORE (BATCH PROCESSING FOR LIST)
@@ -1633,4 +1699,11 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except SystemExit:
+        raise
+    except Exception:
+        print("\n❌ Errore non gestito in evaluate_speechocean.py. Stacktrace completo:")
+        traceback.print_exc()
+        sys.exit(1)
