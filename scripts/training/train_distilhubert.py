@@ -242,6 +242,9 @@ def train_distilhubert(
     gradient_accumulation_steps: int = 4,
     learning_rate: float = 3e-5,
     warmup_ratio: float = 0.1,
+    warmup_steps: int = 100,
+    freeze_feature_encoder: bool = True,
+    seed: int = 42,
     resume: bool = False,
     force_download: bool = False,
     keep_in_memory: bool = True,
@@ -262,12 +265,12 @@ def train_distilhubert(
     )
     print(f"   Vocab size: {len(tokenizer)}")
 
-    # Normalizzazione esplicita nel preprocessing (zero-mean/unit-variance)
+    # Normalizzazione: usiamo quella del feature extractor (coerente con altri script)
     feature_extractor = Wav2Vec2FeatureExtractor(
         feature_size=1,
         sampling_rate=16000,
         padding_value=0.0,
-        do_normalize=False,
+        do_normalize=True,
         return_attention_mask=True,
     )
     processor = Wav2Vec2Processor(feature_extractor=feature_extractor, tokenizer=tokenizer)
@@ -286,6 +289,13 @@ def train_distilhubert(
 
     if hasattr(model, "lm_head"):
         _reinit_lm_head(model.lm_head, std=0.02)
+
+    if freeze_feature_encoder:
+        try:
+            model.freeze_feature_encoder()
+            print("   ✓ Feature encoder frozen")
+        except Exception as e:
+            print(f"   ⚠️ Impossibile congelare feature encoder: {e}")
 
     try:
         model.gradient_checkpointing_enable()
@@ -332,11 +342,6 @@ def train_distilhubert(
 
         if sr != 16000:
             audio = librosa.resample(audio, orig_sr=sr, target_sr=16000)
-
-        # Normalizzazione esplicita (zero-mean / unit-variance)
-        mean = float(np.mean(audio)) if audio.size else 0.0
-        std = float(np.std(audio)) if audio.size else 1.0
-        audio = (audio - mean) / (std + 1e-8)
 
         inputs = processor(audio, sampling_rate=16000, return_tensors=None)
         batch["input_values"] = inputs.input_values[0]
@@ -403,7 +408,8 @@ def train_distilhubert(
         per_device_eval_batch_size=batch_size,
         gradient_accumulation_steps=gradient_accumulation_steps,
         learning_rate=learning_rate,
-        warmup_ratio=warmup_ratio,
+        warmup_steps=int(warmup_steps),
+        warmup_ratio=(float(warmup_ratio) if int(warmup_steps) == 0 else 0.0),
         weight_decay=0.01,
         logging_steps=50,
         eval_strategy="epoch",
@@ -417,6 +423,7 @@ def train_distilhubert(
         max_grad_norm=1.0,
         report_to="none",
         remove_unused_columns=False,
+        seed=int(seed),
     )
 
     trainer = Trainer(
@@ -464,6 +471,22 @@ def main():
     parser.add_argument("--gradient-accumulation-steps", type=int, default=4)
     parser.add_argument("--learning-rate", type=float, default=3e-5)
     parser.add_argument("--warmup-ratio", type=float, default=0.1)
+    parser.add_argument(
+        "--warmup-steps",
+        type=int,
+        default=100,
+        help="Warmup steps (se > 0 ha priorità su --warmup-ratio)",
+    )
+
+    parser.add_argument(
+        "--no-freeze-feature-encoder",
+        action="store_false",
+        dest="freeze_feature_encoder",
+        default=True,
+        help="NON congelare il feature encoder",
+    )
+
+    parser.add_argument("--seed", type=int, default=42)
 
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--force-download", action="store_true")
@@ -483,6 +506,9 @@ def main():
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         learning_rate=args.learning_rate,
         warmup_ratio=args.warmup_ratio,
+        warmup_steps=args.warmup_steps,
+        freeze_feature_encoder=args.freeze_feature_encoder,
+        seed=args.seed,
         resume=args.resume,
         force_download=args.force_download,
         keep_in_memory=(not args.no_keep_in_memory),
