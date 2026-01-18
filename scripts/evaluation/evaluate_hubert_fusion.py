@@ -1,35 +1,64 @@
 #!/usr/bin/env python3
 """
-Late Fusion "Dream Team" - HuBERT Large + WavLM Weighted Ensemble.
+==============================================================================
+LATE FUSION EVALUATION - HuBERT Large + WavLM Weighted Ensemble
+==============================================================================
 
-Questo script combina i due top-performer del benchmark:
+Questo script implementa Late Fusion combinando i due top-performer del benchmark:
 - HuBERT Large: Best PER (8.84%) - eccellente per trascrizione fonetica
 - WavLM Weighted: Best AUC (0.8523) - eccellente per detection errori
 
-La Late Fusion combina le predizioni a livello di logits:
+FORMULA LATE FUSION:
+-------------------
     final_logits = α * logits_HuBERT + (1-α) * logits_WavLM
 
-dove α è il peso del modello HuBERT (default: 0.5 per media semplice).
+dove α è il peso del modello HuBERT. Valori consigliati:
+    - α = 0.3 → Favorisce WavLM (migliore detection errori)
+    - α = 0.5 → Bilanciato
+    - α = 0.7 → Favorisce HuBERT (migliore trascrizione)
+    - α = 0.9 → Quasi solo HuBERT (minima influenza WavLM)
 
 MOTIVAZIONE SCIENTIFICA:
+-----------------------
 - HuBERT è pre-training con target discreti (k-means) → focalizzato su unità fonetiche
 - WavLM usa denoising pre-training → robusto a variazioni acustiche
 - Combinandoli otteniamo: trascrizione precisa + detection robusta
 
-Uso:
-    # Test pesi singoli
+VANTAGGI LATE FUSION:
+--------------------
+- Nessun training aggiuntivo richiesto
+- Facile da implementare e interpretare
+- Peso α controllabile per trade-off PER vs AUC
+
+SVANTAGGI:
+---------
+- Peso α fisso per tutti i timestep (non adattivo)
+- Richiede 2 forward pass (più lento di Gated Fusion)
+
+USO:
+----
+    # Test peso singolo
     python scripts/evaluation/evaluate_hubert_fusion.py \\
-        --model-hubert outputs/hubert_large/final_model_hubert \\
-        --model-wavlm outputs/final_model_weighted \\
+        --model-hubert outputs/backup/hubert/final_model \\
+        --model-wavlm outputs/backup/wavlm_weighted/final_model \\
         --weight 0.5
 
-    # Sweep automatico
+    # Grid Search automatico (pesi standard: 0.3, 0.5, 0.7, 0.9)
     python scripts/evaluation/evaluate_hubert_fusion.py \\
-        --model-hubert outputs/hubert_large/final_model_hubert \\
-        --model-wavlm outputs/final_model_weighted \\
-        --weights 0.3 0.5 0.7
+        --model-hubert outputs/backup/hubert/final_model \\
+        --model-wavlm outputs/backup/wavlm_weighted/final_model \\
+        --weight-grid
+
+    # Sweep con pesi custom
+    python scripts/evaluation/evaluate_hubert_fusion.py \\
+        --model-hubert outputs/backup/hubert/final_model \\
+        --model-wavlm outputs/backup/wavlm_weighted/final_model \\
+        --weights 0.3 0.5 0.7 0.9
 
 Autore: DeepLearning-Phoneme Project
+Riferimenti:
+  - Vedi docs/FUSION_TECHNIQUES.md per documentazione completa
+  - Late Fusion Theory: https://arxiv.org/abs/1702.01992
 """
 
 import argparse
@@ -698,6 +727,11 @@ def main():
         help="Lista pesi α per sweep (es. 0.3 0.5 0.7)"
     )
     parser.add_argument(
+        "--weight-grid",
+        action="store_true",
+        help="Esegue grid search con pesi standard: 0.3, 0.5, 0.7, 0.9"
+    )
+    parser.add_argument(
         "--quiet",
         action="store_true",
         help="Riduci output"
@@ -710,7 +744,14 @@ def main():
     print("=" * 70)
     
     # Weight sweep o singolo peso
-    if args.weights:
+    if args.weight_grid:
+        # Grid search con pesi standard
+        run_weight_sweep(
+            hubert_path=args.model_hubert,
+            wavlm_path=args.model_wavlm,
+            weights=[0.3, 0.5, 0.7, 0.9],  # Pesi standard per grid search
+        )
+    elif args.weights:
         run_weight_sweep(
             hubert_path=args.model_hubert,
             wavlm_path=args.model_wavlm,
@@ -724,12 +765,14 @@ def main():
         )
         run_fusion_benchmark(fusion, verbose=not args.quiet)
     else:
-        # Default: sweep standard
-        run_weight_sweep(
+        # Default: benchmark con peso 0.5
+        print("\n💡 Usa --weight-grid per grid search o --weight per peso specifico")
+        fusion = HuBERTWavLMFusion(
             hubert_path=args.model_hubert,
             wavlm_path=args.model_wavlm,
-            weights=[0.3, 0.5, 0.7],
+            weight=0.5,
         )
+        run_fusion_benchmark(fusion, verbose=not args.quiet)
     
     print("\n✓ Valutazione completata!")
 

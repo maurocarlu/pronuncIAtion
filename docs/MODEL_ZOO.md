@@ -2,6 +2,52 @@
 
 Questo documento descrive in dettaglio tutte le architetture implementate e testate nel benchmark.
 
+## Come leggere questo documento (Training Modes)
+
+Qui “training mode” significa *quali parametri aggiorniamo davvero* durante il training CTC. In questo progetto compaiono tipicamente queste modalità:
+
+### A) Full Fine-Tuning (end-to-end)
+- **Cosa**: backbone + CTC head vengono aggiornati.
+- **Quando conviene**: modelli audio *CTC‑native* (es. HuBERT/WavLM/XLS‑R) con VRAM sufficiente e dataset abbastanza grande/variato.
+- **Pro**: massima capacità di adattamento → in genere **miglior PER**.
+- **Contro**: costo/VRAM alti, rischio overfit/instabilità CTC se LR troppo alta.
+
+### B) Freeze del Feature Encoder (CNN) + Fine-Tuning dei Transformer blocks
+- **Cosa**: si congela la parte “front‑end” (feature encoder) e si allena la parte Transformer + head.
+- **Quando conviene**: su modelli Wav2Vec2‑like per migliorare stabilità e ridurre compute.
+- **Pro**: più stabile, riduce peak memory/tempo.
+- **Contro**: meno capacità di adattamento sull’input acustico (rumore/microfono).
+
+### C) Linear Probe (backbone frozen, solo head)
+- **Cosa**: backbone completamente congelato; si allena solo una piccola head (CTC / MLP).
+- **Quando conviene**: modelli enormi (≥1B) o multimodali, oppure quando vuoi una baseline “quanto è buono l’encoder zero‑shot?”.
+- **Pro**: training economico, VRAM bassa.
+- **Contro**: spesso non basta per PER basso (il backbone non si adatta al tuo vocabolario/lingua/IPA).
+
+### D) Partial Unfreeze / Layerwise Unfreezing
+- **Cosa**: si congela quasi tutto e si sbloccano solo gli ultimi N layer (o pochi blocchi) con LR più bassa.
+- **Quando conviene**: quando l’architettura non è nata per CTC (es. encoder di modelli Seq2Seq) o quando full FT collassa.
+- **Pro**: compromesso tra adattamento e stabilità.
+- **Contro**: richiede tuning accurato (LR differenziate, scheduler, warmup).
+
+### E) PEFT / LoRA
+- **Cosa**: invece di aggiornare i pesi del backbone, si aggiungono adapter LoRA (matrici a rango basso) su moduli selezionati (tipicamente proiezioni attention/MLP).
+- **Quando conviene**: modelli grandi (≈1B) dove full FT è troppo costoso.
+- **Pro**: pochissimi parametri trainabili, più facile da salvare/versionare.
+- **Contro**: può underfittare su task “molto fine‑grained” come phoneme CTC se i target LoRA non sono scelti bene.
+
+### F) QLoRA (LoRA + quantizzazione 4‑bit)
+- **Cosa**: backbone quantizzato 4‑bit (NF4) + LoRA trainabile.
+- **Quando conviene**: VRAM limitata, modelli ≥1B.
+- **Pro**: rende possibili esperimenti altrimenti impossibili su GPU consumer.
+- **Contro**: alcuni modelli audio non gradiscono bene 4‑bit (in‑place ops / dtype mismatch); spesso serve disabilitare ottimizzazioni e usare `fp16/bf16` con attenzione.
+
+### Checklist “CTC non collassa” (pratica)
+- Re‑inizializzare la head (`lm_head`) e usare `ctc_zero_infinity=True`.
+- Verificare che **vocab/tokenizer** (IPA) siano coerenti e che il blank/pad id sia corretto.
+- Controllare che la pipeline input sia quella attesa dal modello (raw waveform vs `input_features` log‑mel).
+- Se vedi predizioni vuote o caratteri ripetuti: ridurre LR, aumentare warmup, filtrare esempi troppo lunghi, e monitorare blank ratio.
+
 ---
 
 ## 1. WavLM (Large)
@@ -231,10 +277,14 @@ Combina il contrastive learning di Wav2Vec2 con MLM di BERT.
 | Model | `Wav2Vec2BertForCTC` |
 
 ### Training
-- **LR**: 5e-6 (conservativo per evitare CTC collapse)
-- **Warmup**: 2000 steps
-- **Freeze**: `feature_projection` (non esiste `freeze_feature_encoder()`)
-- **Subsampling**: Fattore 2 sui frame spettrogramma
+
+Questo modello è molto sensibile alla pipeline *log‑mel*. Nel progetto:
+- **Freeze**: si congela `feature_projection` (W2V‑BERT non espone `freeze_feature_encoder()`).
+- **Default nello script**: `learning_rate=5e-5` (vedi script).
+- **Valore usato nel benchmark Excel**: LR `5e-6` (più conservativo).
+- **Warmup**: gestito via `TrainingArguments` (nei run benchmark compare warmup “alto” per stabilità).
+
+**Risultati benchmark (Aug_Comb)**: PER molto alto (~88%) e AUC bassa (~0.69) → forte indicazione di mismatch/preprocessing errato o training non convergente.
 
 ---
 
@@ -284,10 +334,14 @@ Questo esperimento serve a confrontare in modo “fair” l’efficacia di:
 - **Vocab custom**: `data/processed/vocab.json`
 - **Tokenizer**: `bos_token=None`, `eos_token=None`
 - **Init head**: re-init `lm_head` (std=0.02), `ignore_mismatched_sizes=True`
-- **Hyperparams benchmark**: LR `3e-5`, `warmup_ratio=0.1`, `gradient_accumulation_steps=4`
+- **Hyperparams (script)**: LR `1e-5`, `warmup_ratio=0.2`, `gradient_accumulation_steps=4`
 - **Memoria**: `fp16=True`, `gradient_checkpointing=True`
 - **Anti-OOM**: bucketing `group_by_length=True` e (se necessario) `--max-audio-seconds`
 - **Monitoring**: `PredictionMonitorCallback` ogni 100 step
+
+**Risultati benchmark (Aug_Comb)**: PER estremamente alto (~267%) e AUC ~0.64 → run considerato **fallito/non convergente**.
+
+> Nota su naming: nel benchmark compare come “(Peft)”, ma lo script attuale `train_mctct.py` non applica LoRA/PEFT; trattalo come esperimento full/standard (instabile) finché non viene aggiunta PEFT esplicita.
 
 ### Script
 Vedi `scripts/training/train_mctct.py`.
@@ -348,24 +402,26 @@ Pesi testati: α ∈ {0.3, 0.5, 0.7}
 
 | Parametro | Valore |
 |-----------|--------|
-| **Backbone 1** | HuBERT Large (frozen, fine-tuned encoder) |
-| **Backbone 2** | WavLM Base (frozen, fine-tuned encoder) |
-| **Concatenazione** | 1024 + 768 = 1792D |
-| **CTC Head** | Linear(1792, vocab_size) |
-| **VRAM** | ~8-10GB (con 4-bit quantization) |
+| **Backbone 1** | HuBERT Large (`facebook/hubert-large-ls960-ft`) |
+| **Backbone 2** | WavLM Base/Large (opzionale weighted) |
+| **Concatenazione** | 1024 + 768 = 1792D (Base) **oppure** 1024 + 1024 = 2048D (Large) |
+| **Trainable** | CTC head + (opz.) layer weights WavLM |
+| **VRAM** | ~10-12GB (Base) / ~16-20GB (Large) con fp16 + gradient checkpointing |
 
 ### Architettura
 ```
 Audio → HuBERT Large → 1024D ─┐
-                               ├→ concat(1792D) → CTC Head → Phonemes
-Audio → WavLM Base  → 768D ──┘
+                               ├→ concat(1792/2048D) → Dropout → CTC Head → Phonemes
+Audio → WavLM Base/Large → 768/1024D ─┘
 ```
 
 ### Caratteristiche
 - Usa i **tuoi encoder già fine-tuned** per phoneme recognition
-- Solo la CTC head viene trainata (frozen backbones)
-- Supporta 4-bit quantization per ridurre VRAM
-- Il classificatore ha accesso simultaneo a rappresentazioni fonetiche (HuBERT) e acustiche (WavLM)
+- Backbone tipicamente **frozen** (o LR molto bassa), per stabilità e VRAM
+- 4-bit **disabilitato nello script** (stabilità); si usa fp16 + checkpointing
+- Il classificatore combina rappresentazioni fonetiche (HuBERT) e acustiche/robuste (WavLM)
+
+**Risultati benchmark (Aug_Comb)**: PER ~9.5% e AUC fino a ~0.848 → tra i migliori compromessi PER/AUC.
 
 ### Script
 - Training: `scripts/training/train_early_fusion.py`
@@ -391,21 +447,21 @@ Modello "stupido" di controllo. Se un classificatore semplice su feature medie f
 
 | Modello | Input Type | Params | Training Mode | VRAM | Status | Script |
 |---------|------------|--------|---------------|------|--------|--------|
-| **HuBERT Large** | Raw Waveform | 317M | Fine-tuning | ~12GB | ✅ **Best PER** | `train_hubert.py` |
-| **WavLM Weighted** | Raw Waveform | 317M | Fine-tuning | ~12GB | ✅ **Best AUC** | `train_weighted.py` |
+| **HuBERT Large** | Raw Waveform | 317M | Full FT (CTC) | ~12GB | ✅ **Best PER** | `train_hubert.py` |
+| **WavLM Large Weighted** | Raw Waveform | 317M | Full FT (CTC) | ~12GB | ✅ **Best AUC** | `train_weighted.py` |
 | **Late Fusion** | Raw Waveform | 634M | Inference Only | ~16GB | 🆕 NEW | `evaluate_hubert_fusion.py` |
-| **Early Fusion** | Raw Waveform | 413M+2K | Frozen+CTC | ~8GB | 🆕 UPDATED | `train_early_fusion.py` |
+| **Early Fusion** | Raw Waveform | ~634M + head | Frozen/low‑LR + CTC | ~10-20GB | 🆕 UPDATED | `train_early_fusion.py` |
 | WavLM Base/Large | Raw Waveform | 317M | Fine-tuning | ~12GB | ✅ Works | `train_wavlm.py` |
 | XLS-R 300M | Raw Waveform | 300M | Fine-tuning | ~10GB | ✅ Works | `train_xlsr.py` |
-| XLS-R 1B | Raw Waveform | 1B | Fine-tuning / QLoRA | ~16GB / ~8GB | ⏳ TBD | `train_xlsr_1b.py` |
+| XLS-R 1B | Raw Waveform | 1B | PEFT/QLoRA (run) | ~16GB / ~8GB | ✅ Ran (ma PER alto) | `train_xlsr_1b.py` |
 | Baseline MLP | Raw Waveform | 2M train | Linear Probe | ~4GB | ✅ Works | `train_baseline_mlp.py` |
-| Whisper Small (Encoder) | Mel Spectrogram | 244M | Partial Fine-tuning | ~8GB | ❌ Failed | `train_whisper_encoder.py` |
-| Wav2Vec2-BERT | Mel Spectrogram | 600M | Fine-tuning | ~12GB | ❌ Failed | `train_w2v2_bert.py` |
-| Qwen2-Audio | Mel Spectrogram | 260K train | Linear Probe | ~5GB | ⏳ TBD | `train_qwen_audio.py` |
-| SpeechTokenizer | Discrete Tokens | 256K train | 2-Stage | ~4GB | ⚠️ Partial | `train_speechtokenizer.py` |
-| Data2Vec2 Large | Raw Waveform | 317M | Fine-tuning | ~12GB | ⏳ TBD | `train_data2vec2.py` |
-| MMS 1B | Raw Waveform | 1B | Fine-tuning / QLoRA | ~16GB / ~8GB | ⏳ TBD | `train_mms_1b.py` |
-| M-CTC-T (Meta) | Mel Spectrogram | ~? | Fine-tuning | ~10-12GB | ⏳ TBD | `train_mctct.py` |
-| Parakeet-CTC 1.1B | Audio 16kHz | 1.1B | Linear Probe (4-bit) | ~? | ⏳ TBD | `train_parakeet.py` |
+| Whisper Small (Encoder) | Mel Spectrogram | 244M | Partial FT | ~8GB | ❌ Failed (PER molto alto) | `train_whisper_encoder.py` |
+| Wav2Vec2-BERT | Log‑Mel Spectrogram | 600M | Partial FT (freeze proj) | ~10-12GB | ❌ Failed (PER ~88%) | `train_w2v2_bert.py` |
+| Qwen2-Audio | Mel Spectrogram | 260K train | Linear Probe (4-bit) | ~5-6GB | ✅ Ran (baseline) | `train_qwen_audio.py` |
+| SpeechTokenizer | Discrete Tokens | 256K train | 2‑Stage | ~4GB | ✅ Ran (ma debole) | `train_speechtokenizer.py` |
+| Data2Vec2 Large | Raw Waveform | 317M | Full FT (CTC) | ~12GB | ✅ Ran | `train_data2vec2.py` |
+| MMS 1B | Raw Waveform | 1B | PEFT/QLoRA (run) | ~16GB / ~8GB | ✅ Ran | `train_mms_1b.py` |
+| M-CTC-T (Meta) | Mel Spectrogram | ~? | Full FT (instabile) | ~10-12GB | ❌ Failed | `train_mctct.py` |
+| Parakeet-CTC 1.1B | Audio 16kHz | 1.1B | Linear Probe (4-bit) | ~? | ❌ Failed | `train_parakeet.py` |
 
 > **💡 Key Insight**: L'input type conta, ma la differenza vera la fanno **pre-training + preprocessing corretto**. Alcuni modelli mel-based (es. Whisper Encoder) hanno fallito per mismatch architetturale/CTC; altri modelli CTC nativi (es. M-CTC-T) sono progettati per lavorare su feature 2D.

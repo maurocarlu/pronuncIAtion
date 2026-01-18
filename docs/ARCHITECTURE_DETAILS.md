@@ -305,12 +305,12 @@ A differenza della Late Fusion che combina le predizioni finali, la Early Fusion
 ```mermaid
 flowchart LR
     A[Audio 16kHz] --> B[HuBERT Large<br/>frozen, fine-tuned]
-    A --> C[WavLM Base<br/>frozen, fine-tuned]
+    A --> C[WavLM Large (weighted)<br/>frozen, fine-tuned]
     B --> D[Hidden 1024D]
-    C --> E[Hidden 768D]
+    C --> E[Hidden 1024D]
     D --> F[Concat]
     E --> F
-    F --> G[1792D Features]
+    F --> G[2048D Features]
     G --> H[Dropout 0.1]
     H --> I[Linear CTC Head]
     I --> J[Phonemes IPA]
@@ -328,7 +328,7 @@ class EarlyFusionModel(nn.Module):
         for p in self.hubert.parameters():
             p.requires_grad = False
         
-        # Backbone 2: WavLM Base (frozen, può caricare da ForCTC fine-tuned)
+        # Backbone 2: WavLM Large (frozen, può caricare da ForCTC fine-tuned)
         # Lo script estrae automaticamente encoder da WavLMForCTC
         self.wavlm = WavLMModel.from_pretrained("your_finetuned_wavlm")
         for p in self.wavlm.parameters():
@@ -336,15 +336,15 @@ class EarlyFusionModel(nn.Module):
         
         # CTC Head (unico trainable)
         self.dropout = nn.Dropout(0.1)
-        self.ctc_head = nn.Linear(1792, vocab_size)  # 1024+768
+        self.ctc_head = nn.Linear(2048, vocab_size)  # 1024+1024
     
     def forward(self, audio):
         # Estrai feature da entrambi
         h_hubert = self.hubert(audio).last_hidden_state  # [B, T, 1024]
-        h_wavlm = self.wavlm(audio).last_hidden_state    # [B, T, 768]
+        h_wavlm = self.wavlm(audio).last_hidden_state    # [B, T, 1024]
         
         # Concatenazione Early Fusion
-        combined = torch.cat([h_hubert, h_wavlm], dim=-1)  # [B, T, 1792]
+        combined = torch.cat([h_hubert, h_wavlm], dim=-1)  # [B, T, 2048]
         
         # CTC
         logits = self.ctc_head(self.dropout(combined))
@@ -355,15 +355,139 @@ class EarlyFusionModel(nn.Module):
 
 | Configurazione | VRAM Stimata |
 |----------------|--------------|
-| HuBERT Large + WavLM **Large** | ~16-20GB ❌ |
-| HuBERT Large + WavLM **Base** + fp16 | ~10-12GB ✅ |
-| HuBERT Large + WavLM **Base** + **4-bit** | ~6-8GB ✅ |
+| HuBERT Large + WavLM **Large** (fp16 + checkpointing) | ~16-20GB |
+| HuBERT Large + WavLM **Large** (senza checkpointing) | ~24GB |
+| HuBERT Large + WavLM **Base** (alternativa più leggera) | ~10-12GB |
 
 **Raccomandazioni**:
-- Usare `WavLM Base` invece di Large per ridurre VRAM
-- Abilitare 4-bit quantization (`bitsandbytes`) per backbone frozen
+- Nel nostro script la quantizzazione **4-bit è disabilitata** (stabilità). Se la riabiliti, aspettati edge-case di dtype/in-place ops.
+- Se hai VRAM limitata, usare `WavLM Base` al posto di Large riduce molto il consumo (ma cambia la dimensionalità e può impattare performance).
 - Usare encoder già fine-tuned con `--wavlm-path` e `--hubert-path`
 - Training fattibile su T4 (16GB) con batch_size=1, gradient_accumulation=16
+
+**Risultati benchmark (Aug_Comb)**: PER ~9.46–9.52 e AUC ~0.840–0.848.
+
+> Nota: nel file Excel alcune righe Early Fusion sono annotate come “HuBERT Large + WavLM Base (weighted)”. Lo script supporta entrambe le varianti (Base → 1792D, Large → 2048D); il diagramma sopra mostra il caso “Large”.
+
+---
+
+## 6c. Gated Fusion via Learnable Gates ⭐ NEW
+
+### 🎯 Motivazione
+
+**Problema**: Late Fusion usa un peso α fisso, Early Fusion concatena tutto senza pesi espliciti.
+
+**Soluzione**: Gated Fusion apprende un **gate dinamico per ogni timestep** che decide quanto pesare ciascun backbone.
+
+> **Documentazione completa**: Vedi [FUSION_TECHNIQUES.md](FUSION_TECHNIQUES.md) per dettagli approfonditi.
+
+### 📐 Formula Matematica
+
+```
+h_hubert = HuBERT_encoder(audio)              # [batch, time, 1024]
+h_wavlm = WavLM_encoder(audio)                # [batch, time, 1024]
+
+# Gate Network: MLP che produce gate per ogni timestep
+gate_input = concat([h_hubert, h_wavlm])      # [batch, time, 2048]
+gate = σ(W_gate · gate_input + b_gate)        # [batch, time, 1] in [0, 1]
+
+# Fusione pesata dinamica
+h_fused = gate * h_hubert + (1 - gate) * h_wavlm  # [batch, time, 1024]
+
+# CTC decoding
+logits = CTC_head(dropout(h_fused))
+```
+
+### 🧠 Interpretazione Gate
+
+| Gate Value | Interpretazione |
+|------------|-----------------|
+| ≈ 1.0 | Preferisce HuBERT (fonemi chiari) |
+| ≈ 0.5 | Contributo bilanciato |
+| ≈ 0.0 | Preferisce WavLM (audio rumoroso) |
+
+### 🏗️ Architettura
+
+```mermaid
+flowchart TB
+    A[Audio 16kHz] --> B[HuBERT Large<br/>FROZEN]
+    A --> C[WavLM Weighted<br/>FROZEN]
+    B --> D[h_hubert 1024D]
+    C --> E[h_wavlm 1024D]
+    
+    D --> F[Concat 2048D]
+    E --> F
+    F --> G["Gate Network<br/>Linear(2048→1) + σ"]
+    G --> H["gate ∈ [0,1]"]
+    
+    D --> I["gate × h_hubert"]
+    E --> J["(1-gate) × h_wavlm"]
+    H --> I
+    H --> J
+    I --> K[h_fused 1024D]
+    J --> K
+    
+    K --> L[Dropout + CTC Head]
+    L --> M[Phonemes IPA]
+    
+    style B fill:#e1f5fe
+    style C fill:#e1f5fe
+    style G fill:#c8e6c9
+    style L fill:#c8e6c9
+```
+
+### 🛠️ Implementazione
+
+```python
+class GatedFusionModel(nn.Module):
+    def __init__(self, vocab_size=43):
+        super().__init__()
+        # Backbone frozen
+        self.hubert = HubertModel.from_pretrained("path/to/finetuned")
+        self.wavlm = WavLMModel.from_pretrained("path/to/finetuned")
+        for p in self.hubert.parameters(): p.requires_grad = False
+        for p in self.wavlm.parameters(): p.requires_grad = False
+        
+        # Gate Network (TRAINABLE)
+        self.gate_network = nn.Linear(2048, 1)  # Concat → gate
+        
+        # CTC Head (TRAINABLE)
+        self.dropout = nn.Dropout(0.1)
+        self.ctc_head = nn.Linear(1024, vocab_size)  # h_fused → logits
+    
+    def forward(self, audio):
+        with torch.no_grad():
+            h_hubert = self.hubert(audio).last_hidden_state
+            h_wavlm = self.wavlm(audio).last_hidden_state
+        
+        # Calcola gate per ogni timestep
+        gate = torch.sigmoid(self.gate_network(
+            torch.cat([h_hubert, h_wavlm], dim=-1)
+        ))
+        
+        # Fusione pesata
+        h_fused = gate * h_hubert + (1 - gate) * h_wavlm
+        
+        return self.ctc_head(self.dropout(h_fused))
+```
+
+### ⚙️ Confronto Parametri Trainabili
+
+| Tecnica | Trainable Params | Output Dim |
+|---------|------------------|------------|
+| **Early Fusion** | ~88K (CTC head) | 2048D → vocab |
+| **Gated Fusion** | ~46K (gate + CTC) | 1024D → vocab |
+| **Late Fusion** | 0 | vocab |
+
+### 📝 Uso
+
+```bash
+python scripts/training/train_gated_fusion.py \
+    --hubert-path outputs/backup/hubert/final_model \
+    --wavlm-path outputs/backup/wavlm_weighted/final_model \
+    --epochs 5 \
+    --output-dir outputs/gated_fusion
+```
 
 ---
 

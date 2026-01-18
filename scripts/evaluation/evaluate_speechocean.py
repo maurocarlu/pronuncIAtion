@@ -14,6 +14,7 @@ import argparse
 import sys
 import traceback
 from pathlib import Path
+from typing import Any, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -30,6 +31,112 @@ from src.data.normalize_ipa import (
     arpa_to_ipa,
     get_corrected_arpa_to_ipa_mapping,
 )
+
+
+def _to_mono_float32(arr: np.ndarray) -> np.ndarray:
+    arr = np.asarray(arr)
+    if arr.ndim == 1:
+        out = arr
+    elif arr.ndim == 2:
+        # Heuristic: handle both (channels, time) and (time, channels)
+        if arr.shape[0] <= 8 and arr.shape[1] > arr.shape[0]:
+            out = arr.mean(axis=0)
+        elif arr.shape[1] <= 8:
+            out = arr.mean(axis=1)
+        else:
+            out = arr.reshape(-1)
+    else:
+        out = arr.reshape(-1)
+
+    if out.dtype != np.float32:
+        out = out.astype(np.float32)
+    return out
+
+
+def _resample_1d(arr: np.ndarray, orig_sr: int, target_sr: int) -> np.ndarray:
+    if int(orig_sr) == int(target_sr):
+        return arr
+    # Prefer librosa if present (consistent with other scripts), else scipy.
+    try:
+        import librosa
+
+        return librosa.resample(arr, orig_sr=orig_sr, target_sr=target_sr).astype(np.float32)
+    except Exception:
+        pass
+
+    try:
+        from scipy.signal import resample_poly
+        import math
+
+        g = math.gcd(int(orig_sr), int(target_sr))
+        up = int(target_sr) // g
+        down = int(orig_sr) // g
+        return resample_poly(arr, up=up, down=down).astype(np.float32)
+    except Exception:
+        # Very last resort: linear interpolation
+        ratio = float(target_sr) / float(orig_sr)
+        n = int(max(1, round(len(arr) * ratio)))
+        x_old = np.linspace(0.0, 1.0, num=len(arr), endpoint=False)
+        x_new = np.linspace(0.0, 1.0, num=n, endpoint=False)
+        return np.interp(x_new, x_old, arr).astype(np.float32)
+
+
+def _decode_audio_to_16k(audio_data: Any, *, target_sr: int = 16000) -> Tuple[np.ndarray, int]:
+    """Decode HF datasets audio payload into a mono float32 numpy array.
+
+    Supports:
+    - dict: {"array", "sampling_rate"} or {"path"}
+    - datasets Audio objects with .array
+    - torchcodec AudioDecoder (datasets.features._torchcodec.AudioDecoder) via get_all_samples()
+    - generic array-like types
+    """
+
+    arr = None
+    sr = target_sr
+
+    if isinstance(audio_data, dict):
+        if audio_data.get("array") is not None:
+            arr = audio_data.get("array")
+            sr = int(audio_data.get("sampling_rate", target_sr) or target_sr)
+        elif "path" in audio_data:
+            import soundfile as sf
+
+            arr, sr = sf.read(audio_data["path"], dtype="float32", always_2d=False)
+    elif hasattr(audio_data, "get_all_samples"):
+        # TorchCodec AudioDecoder path
+        samples = audio_data.get_all_samples()
+        sr = int(getattr(samples, "sample_rate", getattr(samples, "sampling_rate", target_sr)) or target_sr)
+        data = getattr(samples, "data", samples)
+        arr = data.numpy() if hasattr(data, "numpy") else np.asarray(data)
+    elif hasattr(audio_data, "array"):
+        # datasets.Audio (decoded)
+        arr = np.asarray(audio_data.array)
+        sr = int(getattr(audio_data, "sampling_rate", target_sr) or target_sr)
+    elif callable(audio_data):
+        # Some decoders are callable
+        decoded = audio_data()
+        data = getattr(decoded, "data", decoded)
+        arr = data.numpy() if hasattr(data, "numpy") else np.asarray(data)
+        sr = int(getattr(decoded, "sample_rate", getattr(decoded, "sampling_rate", target_sr)) or target_sr)
+    elif isinstance(audio_data, np.ndarray):
+        arr = audio_data
+    elif isinstance(audio_data, (list, tuple)):
+        arr = np.asarray(audio_data)
+    else:
+        # Last resort: treat as path-like
+        import soundfile as sf
+
+        arr, sr = sf.read(str(audio_data), dtype="float32", always_2d=False)
+
+    if arr is None:
+        raise ValueError(f"Audio payload non decodificabile: {type(audio_data)}")
+
+    arr = _to_mono_float32(np.asarray(arr))
+    if int(sr) != int(target_sr):
+        arr = _resample_1d(arr, int(sr), int(target_sr))
+        sr = target_sr
+
+    return arr, int(sr)
 
 
 def extract_phones_from_words(words_list: list) -> str:
@@ -1153,13 +1260,11 @@ def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bo
                     if not ref_ipa:
                         continue
 
-                    audio_data = ex["audio"]
-                    arr = audio_data["array"]
-                    sr = audio_data.get("sampling_rate", 16000)
-                    if sr != 16000:
-                        import librosa
-
-                        arr = librosa.resample(arr, orig_sr=sr, target_sr=16000)
+                    try:
+                        arr, _ = _decode_audio_to_16k(ex["audio"], target_sr=16000)
+                    except Exception as e:
+                        print(f"   ⚠️ Cannot decode audio (streaming): {e}")
+                        continue
 
                     collected_examples.append({
                         "audio": {"array": arr, "sampling_rate": 16000},
@@ -1197,63 +1302,13 @@ def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bo
         # Extract audio arrays from batch
         audio_arrays = []
         for ex in batch_examples:
+
             audio_data = ex["audio"]
-            arr = None
-            sr = 16000
-            
-            # Handle different audio data formats
-            if isinstance(audio_data, dict):
-                arr = audio_data.get("array")
-                sr = audio_data.get("sampling_rate", 16000)
-                # If array is still not numpy, try to get path and load
-                if arr is None and "path" in audio_data:
-                    import soundfile as sf
-                    arr, sr = sf.read(audio_data["path"])
-            elif hasattr(audio_data, "array"):
-                # Handle Audio object from datasets
-                arr = audio_data.array
-                sr = getattr(audio_data, "sampling_rate", 16000)
-            elif hasattr(audio_data, "__call__"):
-                # Handle TorchCodec AudioDecoder - call it to decode
-                try:
-                    decoded = audio_data()
-                    if hasattr(decoded, "data"):
-                        arr = decoded.data.numpy().squeeze()
-                    else:
-                        arr = np.asarray(decoded)
-                    sr = 16000
-                except Exception as e:
-                    print(f"   ⚠️ AudioDecoder failed: {e}")
-                    arr = np.zeros(16000, dtype=np.float32)
-            elif hasattr(audio_data, "__array__"):
-                # Convert array-like objects
-                arr = np.asarray(audio_data)
-            elif isinstance(audio_data, (list, tuple)):
-                arr = np.array(audio_data, dtype=np.float32)
-            elif isinstance(audio_data, np.ndarray):
-                arr = audio_data
-            else:
-                # Last resort: try to read as path string
-                try:
-                    import soundfile as sf
-                    arr, sr = sf.read(str(audio_data))
-                except Exception:
-                    print(f"   ⚠️ Cannot decode audio: {type(audio_data)}")
-                    arr = np.zeros(16000, dtype=np.float32)  # 1 second silence
-            
-            # Resample if needed
-            if sr != 16000 and arr is not None:
-                import librosa
-                arr = librosa.resample(arr, orig_sr=sr, target_sr=16000)
-            
-            # Ensure numpy array with correct dtype
-            if arr is not None:
-                if not isinstance(arr, np.ndarray):
-                    arr = np.array(arr, dtype=np.float32)
-                elif arr.dtype != np.float32:
-                    arr = arr.astype(np.float32)
-            else:
-                arr = np.zeros(16000, dtype=np.float32)
+            try:
+                arr, _ = _decode_audio_to_16k(audio_data, target_sr=16000)
+            except Exception as e:
+                print(f"   ⚠️ Cannot decode audio: {type(audio_data)} ({e})")
+                arr = np.zeros(16000, dtype=np.float32)  # 1 second silence
             
             audio_arrays.append(arr)
         

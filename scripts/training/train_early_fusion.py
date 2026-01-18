@@ -181,7 +181,7 @@ class EarlyFusionModel(nn.Module):
         wavlm_name: str = "microsoft/wavlm-large",
         freeze_backbones: bool = True,
         dropout_rate: float = 0.1,
-        use_weighted_wavlm: bool = True,
+        use_weighted_wavlm: bool = False,
     ):
         super().__init__()
         

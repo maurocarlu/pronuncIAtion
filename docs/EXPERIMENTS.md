@@ -9,24 +9,29 @@ Per dettagli sulle metriche, vedi **[docs/BENCHMARK_GUIDE.md](docs/BENCHMARK_GUI
 
 ## 📊 Tabella Riassuntiva Risultati (Gennaio 2025)
 
-| Modello | Input Type | Task A (PER) ↓ | Task B (Pearson) ↑ | Task C (AUC) ↑ | Note |
-|---------|------------|----------------|-------------------|----------------|------|
-| **HuBERT Large** | Raw Waveform | **8.84%** | **0.5932** | 0.8426 | **🏆 Best Overall** |
-| DistilHuBERT | Raw Waveform | TBD | TBD | TBD | Distillazione vs HuBERT Large (≈75% params in meno) |
-| WavLM Base | Raw Waveform | 14.91% | 0.5550 | 0.8369 | Baseline fine-tuned |
-| WavLM Large | Raw Waveform | 17.91% | 0.5736 | 0.8382 | Standard CTC |
-| Baseline MLP | Raw Waveform | 25.92% | 0.5754 | 0.8427 | Linear Probe |
-| WavLM Weighted | Raw Waveform | 30.41% | 0.5812 | **0.8523** | **Best Detection** |
-| XLS-R 300M | Raw Waveform | 39.40% | 0.5589 | 0.8435 | Multilingual |
-| SpeechTokenizer | Discrete | 60.85% | 0.3842 | 0.7311 | Discrete tokens (lossy) |
-| Wav2Vec2-BERT | Mel Spectrogram | 88.58% | 0.3247 | 0.6936 | ❌ Failed (input mismatch) |
-| Whisper Encoder | Mel Spectrogram | ~237% | 0.4510 | 0.7963 | ❌ Failed (CTC not aligned) |
-| Qwen2-Audio | Mel Spectrogram | TBD | TBD | TBD | Linear Probe (encoder frozen) |
-| Data2Vec2 Large | Raw Waveform | TBD | TBD | TBD | New: self-distillation SSL |
-| XLS-R 1B | Raw Waveform | TBD | TBD | TBD | New: scaling test (1B params) |
-| MMS-1B | Raw Waveform | TBD | TBD | TBD | New: massively multilingual (1B) |
-| M-CTC-T (Meta) | Mel Spectrogram | TBD | TBD | TBD | New: Meta Mel-CTC baseline (speechbrain/m-ctc-t-large) |
-| Parakeet-CTC 1.1B | Audio 16kHz | TBD | TBD | TBD | New: FastConformer-CTC baseline (4-bit linear probing) |
+Questa è una **vista sintetica** (3 metriche chiave). La tabella completa (con F1/Precision/Recall/Threshold e note) è in [BENCHMARK_RESULTS.md](BENCHMARK_RESULTS.md).
+
+| Modello | Input Type | Task A PER (HQ) ↓ | Task B Pearson ↑ | Task C AUC ↑ | Note |
+|---------|------------|------------------:|-----------------:|-------------:|------|
+| **HuBERT Large** | Raw Waveform | **8.84** | **0.5932** | 0.8426 | 🏆 Best PER + Best Pearson |
+| EarlyFusion (HuBERT+WavLM) | Raw Waveform | 9.46 | 0.5829 | 0.8404 | Frozen encoders + CTC head only |
+| Early Fusion (HuBERT+WavLM) | Raw Waveform | 9.52 | 0.5886 | **0.8479** | Frozen encoders + CTC head only |
+| WavLM Base (Aug_Comb) | Raw Waveform | 14.91 | 0.5550 | 0.8369 | Baseline fine-tuned |
+| WavLM Large (Aug_Comb) | Raw Waveform | 17.91 | 0.5736 | 0.8382 | Ablation study |
+| Baseline MLP | Raw Waveform | 25.92 | 0.5754 | 0.8427 | WavLM-base frozen + MLP |
+| MMS-1B (PEFT) | Raw Waveform | 27.46 | 0.5773 | **0.8479** | LoRA/QLoRA pipeline (adapter) |
+| WavLM Large Weighted | Raw Waveform | 30.41 | 0.5812 | **0.8523** | 🥇 Best AUC (detection) |
+| Data2Vec2 Large | Raw Waveform | 31.22 | 0.5694 | 0.8420 | Full FT, feature encoder frozen |
+| XLS-R 300M | Raw Waveform | 39.40 | 0.5589 | 0.8435 | Multilingual |
+| Qwen2-Audio 7B (Linear Probe) | Log-Mel | 46.66 | 0.3994 | 0.7531 | 4-bit, encoder frozen, CTC head only |
+| DistilHuBERT V2 | Raw Waveform | 58.08 | 0.4694 | 0.7883 | Distillation (v2) |
+| DistilHuBERT (CTC) | Raw Waveform | 71.19 | 0.3290 | 0.7146 | Distillation (v1) |
+| XLS-R 1B (PEFT) | Raw Waveform | 65.70 | 0.5636 | 0.8366 | Adapter su backbone 1B (risultati deboli) |
+| SpeechTokenizer | Discrete | 60.85 | 0.3842 | 0.7311 | RVQ codes + Transformer classifier |
+| Wav2Vec2-BERT 2.0 | Log-Mel | 88.58 | 0.3247 | 0.6936 | ❌ Probabile mismatch preprocessing spettrogrammi |
+| Whisper Encoder + CTC | Log-Mel | 236.77 | 0.4510 | 0.7963 | ❌ Non convergente (CTC decode fix applicata) |
+| M-CTC-T Large | Log-Mel | 267.18 | 0.2002 | 0.6367 | ❌ Fallito (instabilità training) |
+| Parakeet-CTC 1.1B | Audio 16kHz | 94.73 | -0.0274 | 0.4790 | ❌ Linear probe head-only non informativo |
 
 > **⚠️ Key Finding (updated)**: I modelli raw waveform hanno funzionato in modo più "plug-and-play". I modelli con feature 2D hanno richiesto setup molto più delicato (feature extractor + shape + CTC), e alcuni esperimenti sono falliti per mismatch. Vedi [ARCHITECTURE_DETAILS.md](ARCHITECTURE_DETAILS.md#8--input-types-vs-performance---critical-analysis).
 
@@ -68,17 +73,17 @@ Per dettagli sulle metriche, vedi **[docs/BENCHMARK_GUIDE.md](docs/BENCHMARK_GUI
 | Modello | LR | Batch | Epochs | Mode | Script |
 |---------|-----|-------|--------|------|--------|
 | Wav2Vec2 | 3e-4 | 4 | 10 | Fine-tuning | `train_wav2vec2.py` |
-| Whisper Enc | 3e-4 | 4 | 10 | Partial (last 4) | `train_whisper_encoder.py` |
-| Qwen2-Audio | 1e-3 | 2 | 10 | **Linear Probe** | `train_qwen_audio.py` |
-| Wav2Vec2-BERT | 3e-4 | 4 | 10 | Fine-tuning | `train_w2v2_bert.py` |
-| SpeechTokenizer | 1e-3 | 4 | 10 | 2-Stage | `train_speechtokenizer.py` |
+| Whisper Enc | 1e-4 | 4 | 10 | Partial (unfreeze last 4 encoder layers) | `train_whisper_encoder.py` |
+| Qwen2-Audio | 1e-4 | 2 | 10 | **Linear Probe** (encoder frozen, 4-bit) | `train_qwen_audio.py` |
+| Wav2Vec2-BERT | 5e-5 | 4 | 10 | Fine-tuning (freeze feature_projection) | `train_w2v2_bert.py` |
+| SpeechTokenizer | 1e-4 | 8 | 10 | Discrete tokens → Transformer classifier | `train_speechtokenizer.py` |
 | **Early Fusion** | 1e-4 | 2 | 5 | **Frozen+CTC** | `train_early_fusion.py` |
 | **Wav2Vec2 Phoneme (lv60-pmp)** | **3e-5** | 4 | 10 | Fine-tuning (domain init) | `train_wav2vec2_phoneme.py` |
 | **Data2Vec2 Large** | **3e-5** | 4 | 10 | Fine-tuning (CTC) | `train_data2vec2.py` |
 | **DistilHuBERT** | **3e-5** | 4 | 10 | Fine-tuning (CTC) | `train_distilhubert.py` |
 | **XLS-R 1B** | **3e-5** | 1 | 10 | Fine-tuning / QLoRA (CTC) | `train_xlsr_1b.py` |
 | **MMS-1B** | **3e-5** | 1 | 10 | Fine-tuning / QLoRA (CTC) | `train_mms_1b.py` |
-| **M-CTC-T (Meta)** | **3e-5** | 1-2 | 10 | Fine-tuning (CTC) | `train_mctct.py` |
+| **M-CTC-T (Meta)** | **1e-5** | 2 | 10 | Fine-tuning (CTC) | `train_mctct.py` |
 | **Parakeet-CTC 1.1B** | **3e-5** | 1 | 10 | **Linear Probe (4-bit)** | `train_parakeet.py` |
 
 > **Nota VRAM (1B)**: su 16GB spesso serve `--max-audio-seconds`, bucketing (`group_by_length`) e/o QLoRA (`--load-in-4bit`).
@@ -103,13 +108,13 @@ Combinazione dei due top-performer a livello logit:
 
 | Parametro | Valore |
 |-----------|--------|
-| Backbone 1 | HuBERT Large (frozen, fine-tuned encoder) |
-| Backbone 2 | WavLM Base (frozen, fine-tuned encoder) |
-| Features | 1024 + 768 = 1792D |
-| CTC Head | Linear(1792, 45) |
+| Backbone 1 | HuBERT Large (frozen encoder) |
+| Backbone 2 | WavLM Base o WavLM Large (frozen encoder) |
+| Features | 1024 + 1024 = 2048D (con WavLM Large) |
+| CTC Head | Linear(2048, vocab) |
 | fp16 | ✓ |
-| 4-bit quantization | ✓ (bitsandbytes) |
-| VRAM stimata | ~8-10GB |
+| 4-bit quantization | ✗ (disabilitata nello script per stabilità) |
+| VRAM stimata | ~16-20GB (Large+Large, fp16+checkpointing) |
 
 **Ottimizzazioni memoria**: 
 - WavLM Base invece di Large (~95M vs ~317M)

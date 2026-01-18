@@ -2,6 +2,16 @@
 
 Guida al benchmark scientifico condotto sul dataset SpeechOcean762.
 
+## 0. Risultati (source of truth)
+
+Per evitare ambiguità tra “config dichiarata” e “run effettivo”, i risultati vanno letti in questo ordine:
+
+1. **Excel ufficiale**: `benchmark_results.xlsx` (sheet: `Benchmark Results`) – è la fonte primaria.
+2. **Export Markdown (tabella)**: `docs/BENCHMARK_RESULTS_TABLE.md` – copia 1‑a‑1 della tabella Excel.
+3. **Documento leggibile**: `docs/BENCHMARK_RESULTS.md` – include la tabella + note di lettura.
+
+> Nota: alcune righe in Excel includono suffix tipo “(Peft)” o path `outputs/...`; interpretali come *identificatori del run* (non sempre come garanzia che PEFT sia implementato nello script).
+
 ---
 
 ## 1. Il Dataset: SpeechOcean762
@@ -34,6 +44,9 @@ $$ PER = \frac{Inserzioni + Cancellazioni + Sostituzioni}{Numero Totale Fonemi} 
 
 > **Nota pratica**: nel codice alcune metriche sono calcolate come **CER su stringhe IPA** (edit distance su caratteri). Se l'IPA è tokenizzato 1-a-1 (un simbolo = un token), CER ≈ PER.
 
+#### Perché in Excel a volte l'“Accuracy” è negativa?
+In alcuni export l'accuracy viene derivata come `Accuracy = 100 - PER` (in %). Se un run collassa e produce PER > 100%, allora `100 - PER` diventa negativo: è un segnale chiaro che il modello non è convergente.
+
 ### TASK B: Human Score Correlation
 *Il modello "soffre" sugli stessi errori che gli umani giudicano negativamente?*
 
@@ -52,6 +65,11 @@ $$ PER = \frac{Inserzioni + Cancellazioni + Sostituzioni}{Numero Totale Fonemi} 
 - **Metriche**:
     - **AUC-ROC**: Capacità di separazione indipendentemente dalla soglia.
     - **F1-Score**: Ottimizzato cercando la soglia di PER migliore.
+
+#### Threshold (Task C)
+Nel file Excel la colonna **TaskC_Threshold** è la soglia sullo score (PER o proxy di “errore”) che massimizza l’F1 sul set di valutazione.
+- Valori molto bassi (es. 0.05) spesso indicano modelli che producono PER molto alto o distribuzioni degenerate.
+- Celle vuote indicano che il run non ha prodotto quella metrica (valutazione parziale/aborted, oppure metrica non calcolata).
 
 ---
 
