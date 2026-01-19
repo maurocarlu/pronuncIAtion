@@ -65,12 +65,11 @@ from transformers import (
     Wav2Vec2Processor,
     Wav2Vec2CTCTokenizer,
     Wav2Vec2FeatureExtractor,
-    HubertModel,
+    AutoModel,
     TrainingArguments,
     Trainer,
     TrainerCallback,
 )
-from transformers.models.wavlm import WavLMModel
 import shutil
 
 warnings.filterwarnings("ignore")
@@ -197,51 +196,23 @@ class EarlyFusionModel(nn.Module):
         bnb_config = None
         print(f"   Using: fp16 (4-bit disabled for stability)")
         
-        # Carica HuBERT (supporta sia HubertModel che HubertForCTC checkpoints)
-        print(f"   Loading HuBERT from: {hubert_name}")
-        try:
-            # Prima prova a caricare come HubertForCTC (modello fine-tuned)
-            from transformers import HubertForCTC
-            hubert_full = HubertForCTC.from_pretrained(
-                hubert_name,
-                quantization_config=bnb_config if use_4bit else None,
-                torch_dtype=torch.float16 if not use_4bit else None,
-            )
-            # Estrai solo l'encoder (hubert interno)
-            self.hubert = hubert_full.hubert
-            print(f"   ✓ HuBERT: Loaded from ForCTC checkpoint (encoder extracted)")
-        except Exception:
-            # Fallback: carica come HubertModel base
-            self.hubert = HubertModel.from_pretrained(
-                hubert_name,
-                output_hidden_states=False,
-                quantization_config=bnb_config if use_4bit else None,
-                torch_dtype=torch.float16 if not use_4bit else None,
-            )
-            print(f"   ✓ HuBERT: Loaded as base Model")
-        
-        # Carica WavLM (supporta sia WavLMModel che WavLMForCTC checkpoints)
-        print(f"   Loading WavLM from: {wavlm_name}")
-        try:
-            # Prima prova a caricare come WavLMForCTC (modello fine-tuned)
-            from transformers import WavLMForCTC
-            wavlm_full = WavLMForCTC.from_pretrained(
-                wavlm_name,
-                quantization_config=bnb_config if use_4bit else None,
-                torch_dtype=torch.float16 if not use_4bit else None,
-            )
-            # Estrai solo l'encoder (wavlm interno)
-            self.wavlm = wavlm_full.wavlm
-            print(f"   ✓ WavLM: Loaded from ForCTC checkpoint (encoder extracted)")
-        except Exception:
-            # Fallback: carica come WavLMModel base
-            self.wavlm = WavLMModel.from_pretrained(
-                wavlm_name,
-                output_hidden_states=use_weighted_wavlm,
-                quantization_config=bnb_config if use_4bit else None,
-                torch_dtype=torch.float16 if not use_4bit else None,
-            )
-            print(f"   ✓ WavLM: Loaded as base Model")
+        # Carica backbone A e B in modo generico (HuBERT/WavLM/Wav2Vec2-family)
+        # AutoModel riesce a caricare anche da checkpoint *ForCTC* (carica il base model).
+        print(f"   Loading backbone A from: {hubert_name}")
+        self.hubert = AutoModel.from_pretrained(
+            hubert_name,
+            output_hidden_states=False,
+            torch_dtype=torch.float16 if not use_4bit else None,
+        )
+        print(f"   ✓ Backbone A loaded: {self.hubert.__class__.__name__}")
+
+        print(f"   Loading backbone B from: {wavlm_name}")
+        self.wavlm = AutoModel.from_pretrained(
+            wavlm_name,
+            output_hidden_states=use_weighted_wavlm,
+            torch_dtype=torch.float16 if not use_4bit else None,
+        )
+        print(f"   ✓ Backbone B loaded: {self.wavlm.__class__.__name__}")
         
         # Ensure output_hidden_states is set for weighted sum
         if use_weighted_wavlm:
@@ -250,7 +221,12 @@ class EarlyFusionModel(nn.Module):
         # Weighted Layer Sum per WavLM
         self.use_weighted = use_weighted_wavlm
         if use_weighted_wavlm:
-            num_layers = self.wavlm.config.num_hidden_layers + 1
+            if not hasattr(self.wavlm.config, "num_hidden_layers"):
+                raise ValueError(
+                    "use_weighted_wavlm=True ma il backbone B non espone config.num_hidden_layers. "
+                    "Disabilita il weighted layer-sum per questo modello."
+                )
+            num_layers = int(self.wavlm.config.num_hidden_layers) + 1
             self.layer_weights = nn.Parameter(torch.zeros(num_layers))
             print(f"   WavLM layers: {num_layers} (weighted)")
         
@@ -263,8 +239,8 @@ class EarlyFusionModel(nn.Module):
             print(f"   ✓ Backbone frozen")
         
         # CTC Head
-        hidden_size_h = self.hubert.config.hidden_size  # 1024
-        hidden_size_w = self.wavlm.config.hidden_size   # 1024
+        hidden_size_h = int(self.hubert.config.hidden_size)
+        hidden_size_w = int(self.wavlm.config.hidden_size)
         combined_size = hidden_size_h + hidden_size_w   # 2048
         
         self.dropout = nn.Dropout(dropout_rate)
@@ -573,8 +549,10 @@ class EarlyFusionTrainerWrapper:
         
         # Enable gradient checkpointing per ridurre memoria
         if self.config["training"].get("gradient_checkpointing", True):
-            self.model.hubert.gradient_checkpointing_enable()
-            self.model.wavlm.gradient_checkpointing_enable()
+            if hasattr(self.model.hubert, "gradient_checkpointing_enable"):
+                self.model.hubert.gradient_checkpointing_enable()
+            if hasattr(self.model.wavlm, "gradient_checkpointing_enable"):
+                self.model.wavlm.gradient_checkpointing_enable()
             print("[EarlyFusion] ✓ Gradient checkpointing enabled")
     
     def load_and_prepare_dataset(self):
@@ -853,6 +831,25 @@ def main():
         default=None,
         help="Path to custom HuBERT checkpoint (default: facebook/hubert-large-ls960-ft)"
     )
+
+    # Alias più chiari: backbone A/B (compatibili anche con Wav2Vec2/XLSR, ecc.)
+    parser.add_argument(
+        "--model-a-path",
+        type=str,
+        default=None,
+        help="Alias di --hubert-path: checkpoint HF per backbone A (AutoModel)"
+    )
+    parser.add_argument(
+        "--model-b-path",
+        type=str,
+        default=None,
+        help="Alias di --wavlm-path: checkpoint HF per backbone B (AutoModel)"
+    )
+    parser.add_argument(
+        "--no-weighted-backbone-b",
+        action="store_true",
+        help="Disabilita weighted layer-sum sul backbone B (equivalente a use_weighted_wavlm=False)."
+    )
     
     args = parser.parse_args()
     
@@ -860,13 +857,15 @@ def main():
         with open(args.config) as f:
             config = yaml.safe_load(f)
     else:
+        model_a = args.model_a_path or args.hubert_path
+        model_b = args.model_b_path or args.wavlm_path
         config = {
             "model": {
-                "hubert_name": args.hubert_path or "facebook/hubert-large-ls960-ft",
-                "wavlm_name": args.wavlm_path or "microsoft/wavlm-base",  # Changed to base!
+                "hubert_name": model_a or "facebook/hubert-large-ls960-ft",
+                "wavlm_name": model_b or "microsoft/wavlm-base",  # default leggero
                 "freeze_backbones": True,
                 "dropout_rate": 0.1,
-                "use_weighted_wavlm": True,
+                "use_weighted_wavlm": False if args.no_weighted_backbone_b else True,
             },
             "data": {
                 "csv_path": args.data_csv,
