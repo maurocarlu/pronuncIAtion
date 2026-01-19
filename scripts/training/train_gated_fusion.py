@@ -277,9 +277,9 @@ class GatedFusionModel(nn.Module):
                 hubert_name,
                 torch_dtype=torch.float16,  # FP16 per ridurre VRAM
             )
-            # Estrai solo l'encoder (hubert interno), scartando CTC head
             self.hubert = hubert_full.hubert
-            print(f"   ✓ HuBERT: Loaded from ForCTC checkpoint (encoder extracted)")
+            hubert_size = "Large" if self.hubert.config.hidden_size >= 1024 else "Base"
+            print(f"   ✓ HuBERT: Loaded from ForCTC ({hubert_size}, {self.hubert.config.hidden_size}D)")
         except Exception as e:
             # Fallback: carica come HubertModel base
             print(f"   ⚠️ ForCTC load failed: {e}")
@@ -288,7 +288,8 @@ class GatedFusionModel(nn.Module):
                 output_hidden_states=False,
                 torch_dtype=torch.float16,
             )
-            print(f"   ✓ HuBERT: Loaded as base Model")
+            hubert_size = "Large" if self.hubert.config.hidden_size >= 1024 else "Base"
+            print(f"   ✓ HuBERT: Loaded as base Model ({hubert_size}, {self.hubert.config.hidden_size}D)")
         
         # =====================================================================
         # STEP 3: Carica WavLM backbone
@@ -302,9 +303,9 @@ class GatedFusionModel(nn.Module):
                 wavlm_name,
                 torch_dtype=torch.float16,
             )
-            # Estrai solo l'encoder (wavlm interno), scartando CTC head
             self.wavlm = wavlm_full.wavlm
-            print(f"   ✓ WavLM: Loaded from ForCTC checkpoint (encoder extracted)")
+            wavlm_size = "Large" if self.wavlm.config.hidden_size >= 1024 else "Base"
+            print(f"   ✓ WavLM: Loaded from ForCTC ({wavlm_size}, {self.wavlm.config.hidden_size}D)")
         except Exception as e:
             # Fallback: carica come WavLMModel base
             print(f"   ⚠️ ForCTC load failed: {e}")
@@ -313,7 +314,8 @@ class GatedFusionModel(nn.Module):
                 output_hidden_states=use_weighted_wavlm,
                 torch_dtype=torch.float16,
             )
-            print(f"   ✓ WavLM: Loaded as base Model")
+            wavlm_size = "Large" if self.wavlm.config.hidden_size >= 1024 else "Base"
+            print(f"   ✓ WavLM: Loaded as base Model ({wavlm_size}, {self.wavlm.config.hidden_size}D)")
         
         # Assicura che output_hidden_states sia attivo per weighted sum
         if use_weighted_wavlm:

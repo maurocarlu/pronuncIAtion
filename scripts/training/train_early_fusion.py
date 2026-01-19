@@ -204,7 +204,9 @@ class EarlyFusionModel(nn.Module):
             output_hidden_states=False,
             torch_dtype=torch.float16 if not use_4bit else None,
         )
-        print(f"   ✓ Backbone A loaded: {self.hubert.__class__.__name__}")
+        # Detect model size based on hidden_size
+        hubert_size = "Large" if self.hubert.config.hidden_size >= 1024 else "Base"
+        print(f"   ✓ Backbone A loaded: {self.hubert.__class__.__name__} ({hubert_size}, {self.hubert.config.hidden_size}D)")
 
         print(f"   Loading backbone B from: {wavlm_name}")
         self.wavlm = AutoModel.from_pretrained(
@@ -212,7 +214,9 @@ class EarlyFusionModel(nn.Module):
             output_hidden_states=use_weighted_wavlm,
             torch_dtype=torch.float16 if not use_4bit else None,
         )
-        print(f"   ✓ Backbone B loaded: {self.wavlm.__class__.__name__}")
+        # Detect model size based on hidden_size
+        wavlm_size = "Large" if self.wavlm.config.hidden_size >= 1024 else "Base"
+        print(f"   ✓ Backbone B loaded: {self.wavlm.__class__.__name__} ({wavlm_size}, {self.wavlm.config.hidden_size}D)")
         
         # Ensure output_hidden_states is set for weighted sum
         if use_weighted_wavlm:
