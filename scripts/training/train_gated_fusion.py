@@ -1051,8 +1051,35 @@ class GatedFusionTrainerWrapper:
         
         # Salva modello finale
         final_path = Path(output_dir) / "final_model_gated_fusion"
+        final_path.mkdir(parents=True, exist_ok=True)
+        
+        # Metodo 1: Trainer standard save
         trainer.save_model(str(final_path))
         self.processor.save_pretrained(str(final_path))
+        
+        # Metodo 2: Salva esplicitamente solo i pesi trainabili (fallback)
+        # Questo garantisce che almeno pytorch_model.bin sia sempre valido
+        trainable_state = {}
+        for name, param in self.model.named_parameters():
+            if param.requires_grad:
+                trainable_state[name] = param.data.cpu()
+        # Aggiungi anche layer_weights e altri buffer importanti
+        for name, buffer in self.model.named_buffers():
+            trainable_state[name] = buffer.cpu()
+        
+        # Salva con torch.save (sempre funziona)
+        pytorch_path = final_path / "pytorch_model.bin"
+        torch.save(trainable_state, pytorch_path)
+        print(f"   ✓ Saved trainable weights to {pytorch_path} ({len(trainable_state)} tensors)")
+        
+        # Prova anche safetensors se disponibile
+        try:
+            from safetensors.torch import save_file
+            safetensors_path = final_path / "model.safetensors"
+            save_file(trainable_state, safetensors_path)
+            print(f"   ✓ Saved trainable weights to {safetensors_path}")
+        except Exception as e:
+            print(f"   ⚠️ safetensors save failed: {e}")
         
         # Salva config
         config_save = {
