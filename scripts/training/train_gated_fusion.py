@@ -343,16 +343,43 @@ class GatedFusionModel(nn.Module):
             print(f"   ✓ Backbones FROZEN (no gradients)")
         
         # =====================================================================
-        # STEP 6: Gate Network
+        # STEP 6: Dimension Alignment (NUOVO per supportare hidden_size diversi)
+        # Se HuBERT e WavLM hanno dimensioni diverse, proiettiamo alla dimensione maggiore
+        # =====================================================================
+        hidden_size_h = self.hubert.config.hidden_size  # 1024 per HuBERT Large
+        hidden_size_w = self.wavlm.config.hidden_size   # 768 per WavLM Base, 1024 per Large
+        
+        # Dimensione target per fusione (la maggiore delle due)
+        self.fused_hidden_size = max(hidden_size_h, hidden_size_w)
+        
+        # Proiezione per allineare le dimensioni se diverse
+        self.proj_hubert = None
+        self.proj_wavlm = None
+        
+        if hidden_size_h != self.fused_hidden_size:
+            self.proj_hubert = nn.Linear(hidden_size_h, self.fused_hidden_size)
+            nn.init.xavier_uniform_(self.proj_hubert.weight)
+            nn.init.zeros_(self.proj_hubert.bias)
+            print(f"   ⚠️ HuBERT projection: {hidden_size_h}D → {self.fused_hidden_size}D")
+        
+        if hidden_size_w != self.fused_hidden_size:
+            self.proj_wavlm = nn.Linear(hidden_size_w, self.fused_hidden_size)
+            nn.init.xavier_uniform_(self.proj_wavlm.weight)
+            nn.init.zeros_(self.proj_wavlm.bias)
+            print(f"   ⚠️ WavLM projection: {hidden_size_w}D → {self.fused_hidden_size}D")
+        
+        if hidden_size_h == hidden_size_w:
+            print(f"   ✓ Dimensioni già allineate: {hidden_size_h}D")
+        
+        combined_size = self.fused_hidden_size * 2  # Gate prende concat delle feature proiettate
+        
+        # =====================================================================
+        # STEP 7: Gate Network
         # Questo è il cuore di Gated Fusion: un layer lineare che prende
         # la concatenazione di h_hubert e h_wavlm e produce un gate in [0,1]
         # =====================================================================
-        hidden_size_h = self.hubert.config.hidden_size  # 1024 per HuBERT Large
-        hidden_size_w = self.wavlm.config.hidden_size   # 1024 per WavLM Large
-        combined_size = hidden_size_h + hidden_size_w   # 2048
-        
-        # Gate Network: 2048 → 1 + sigmoid
-        # Input: concatenazione [h_hubert; h_wavlm]
+        # Gate Network: 2*fused_hidden_size → 1 + sigmoid
+        # Input: concatenazione [h_hubert_proj; h_wavlm_proj]
         # Output: gate value per ogni timestep
         self.gate_network = nn.Linear(combined_size, 1)
         
@@ -362,16 +389,15 @@ class GatedFusionModel(nn.Module):
         nn.init.zeros_(self.gate_network.bias)
         
         print(f"\n🚪 Gate Network:")
-        print(f"   Input size: {combined_size}D (concat h_hubert + h_wavlm)")
+        print(f"   Input size: {combined_size}D (concat h_hubert + h_wavlm projected)")
         print(f"   Output: 1D gate per timestep [0, 1]")
         
         # =====================================================================
-        # STEP 7: CTC Head
-        # A differenza di Early Fusion (2048 → vocab), qui è 1024 → vocab
-        # perché l'output fused ha dimensione 1024 (non concatenato)
+        # STEP 8: CTC Head
+        # L'output fused ha dimensione fused_hidden_size
         # =====================================================================
         self.dropout = nn.Dropout(dropout_rate)
-        self.ctc_head = nn.Linear(hidden_size_h, vocab_size)  # 1024 → vocab
+        self.ctc_head = nn.Linear(self.fused_hidden_size, vocab_size)
         
         # Reinizializza CTC head per prevenire CTC collapse
         # std=0.02 è lo standard BERT, funziona bene per CTC
@@ -379,11 +405,11 @@ class GatedFusionModel(nn.Module):
         nn.init.zeros_(self.ctc_head.bias)
         
         print(f"\n📊 CTC Head:")
-        print(f"   Input: {hidden_size_h}D (h_fused)")
+        print(f"   Input: {self.fused_hidden_size}D (h_fused)")
         print(f"   Output: {vocab_size} (vocab size)")
         
         # =====================================================================
-        # STEP 8: Statistiche parametri
+        # STEP 9: Statistiche parametri
         # =====================================================================
         total_params = sum(p.numel() for p in self.parameters())
         trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
@@ -494,20 +520,30 @@ class GatedFusionModel(nn.Module):
         hidden_w = hidden_w[:, :min_len, :]
         
         # =====================================================================
-        # STEP 4: Calcolo Gate (CUORE del Gated Fusion)
+        # STEP 4: Proiezione dimensioni (se necessario)
+        # Allinea le dimensioni alla fused_hidden_size
+        # =====================================================================
+        if self.proj_hubert is not None:
+            hidden_h = self.proj_hubert(hidden_h)
+        if self.proj_wavlm is not None:
+            hidden_w = self.proj_wavlm(hidden_w)
+        
+        # =====================================================================
+        # STEP 5: Calcolo Gate (CUORE del Gated Fusion)
         # Concateniamo le due rappresentazioni e passiamo attraverso gate network
         # =====================================================================
-        # Concatenazione: [batch, time, 2048]
+        # Concatenazione: [batch, time, 2*fused_hidden_size]
         gate_input = torch.cat([hidden_h, hidden_w], dim=-1)
         
         # Gate network + sigmoid: [batch, time, 1] in range [0, 1]
         gate = torch.sigmoid(self.gate_network(gate_input))
         
         # =====================================================================
-        # STEP 5: Fusione pesata con gate
+        # STEP 6: Fusione pesata con gate
         # h_fused = gate * h_hubert + (1 - gate) * h_wavlm
+        # Ora funziona perché entrambi hanno la stessa dimensione
         # =====================================================================
-        h_fused = gate * hidden_h + (1 - gate) * hidden_w  # [batch, time, 1024]
+        h_fused = gate * hidden_h + (1 - gate) * hidden_w  # [batch, time, fused_hidden_size]
         
         # =====================================================================
         # STEP 6: CTC Head

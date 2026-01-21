@@ -648,15 +648,24 @@ def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bo
         wavlm_name = config.get("wavlm_name", "microsoft/wavlm-base")
         
         # Check if paths are local - try local backup paths before HuggingFace
+        # For early_fusion models, the structure is:
+        #   outputs/backup/early_fusion/final_model_hub_wavlm
+        # And backbone models are at:
+        #   outputs/backup/hubert_large/final_model_hubert
+        #   outputs/backup/wavLM/final_model_aug_comb
+        # So backup_root should be outputs/backup (2 levels up from final_model)
         model_base = Path(model_path).parent  # outputs/backup/early_fusion
         
         # Determine root backup dir (outputs/backup)
-        # If model_path is a checkpoint inside early_fusion folder:
-        # outputs/backup/early_fusion/checkpoint-X -> parent.parent = outputs/backup
+        # We need to go up from early_fusion folder to get to outputs/backup
+        # model_path: outputs/backup/early_fusion/final_model_hub_wavlm
+        # backup_root should be: outputs/backup (NOT outputs/backup/early_fusion)
         if "checkpoint-" in str(Path(model_path).name):
-             backup_root = model_base.parent
+            # checkpoint inside final_model: go up 3 levels
+            backup_root = model_base.parent.parent
         else:
-             backup_root = model_base
+            # final_model folder: go up 2 levels (to outputs/backup)
+            backup_root = model_base.parent
 
         # HuBERT fallback logic
         local_hubert = backup_root / "hubert_large" / "final_model_hubert"
