@@ -293,6 +293,7 @@ def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bo
     is_qwen_audio = False
     is_w2v_bert = False
     is_early_fusion = False  # NEW
+    is_gated_fusion = False  # NEW - Gated Fusion
     model = None  # Ensure model is initialized
     config = {}
     
@@ -305,6 +306,7 @@ def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bo
         is_whisper_encoder = config.get("model_type") == "whisper_encoder_ctc"
         is_qwen_audio = config.get("model_type") == "qwen2_audio_ctc"
         is_early_fusion = config.get("model_type") == "early_fusion"  # NEW
+        is_gated_fusion = config.get("model_type") == "gated_fusion"  # NEW
         is_w2v_bert = config.get("model_type") == "wav2vec2-bert" or \
                       "wav2vec2bert" in config.get("architectures", [""])[0].lower() or \
                       "w2v-bert" in str(config.get("_name_or_path", "")).lower()
@@ -345,6 +347,11 @@ def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bo
         if "early_fusion" in path_str:
             print(f"   ℹ️ Detected 'early_fusion' in path. Forcing Early Fusion mode.")
             is_early_fusion = True
+            is_w2v_bert = False
+            is_xlsr_model = False
+        elif "gated_fusion" in path_str:
+            print(f"   ℹ️ Detected 'gated_fusion' in path. Forcing Gated Fusion mode.")
+            is_gated_fusion = True
             is_w2v_bert = False
             is_xlsr_model = False
         elif "w2v-bert" in path_str or "w2v_bert" in path_str:
@@ -416,7 +423,7 @@ def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bo
             processor = ParakeetProcessor.from_pretrained(base_ckpt)
             processor.tokenizer = tokenizer
 
-    elif is_speechtokenizer or is_whisper_encoder or is_qwen_audio or is_early_fusion:
+    elif is_speechtokenizer or is_whisper_encoder or is_qwen_audio or is_early_fusion or is_gated_fusion:
         from transformers import Wav2Vec2CTCTokenizer
         processor = Wav2Vec2CTCTokenizer.from_pretrained(model_path)
     elif is_w2v_bert:
@@ -667,29 +674,66 @@ def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bo
             # final_model folder: go up 2 levels (to outputs/backup)
             backup_root = model_base.parent
 
-        # HuBERT fallback logic
-        local_hubert = backup_root / "hubert_large" / "final_model_hubert"
-        # If explicitly local path but missing, OR if default HF name but local backup exists -> try local
-        if (hubert_name.startswith("/") and not Path(hubert_name).exists()) or \
-           (hubert_name == "facebook/hubert-large-ls960-ft" and local_hubert.exists()):
-            
-            if local_hubert.exists():
-                hubert_name = str(local_hubert)
-                print(f"   ✓ HuBERT: using local backup at {hubert_name}")
-            else:
-                hubert_name = "facebook/hubert-large-ls960-ft"
-                print(f"   ⚠️ HuBERT path not found at {local_hubert}, downloading from HuggingFace...")
+        # HuBERT fallback logic - detect if it's actually WavLM from config path
+        # Some models use WavLM as "hubert" slot (e.g., wavlm+wavlm_large fusion)
+        is_hubert_actually_wavlm = "wavlm" in hubert_name.lower() and "hubert" not in hubert_name.lower()
         
-        # WavLM fallback logic
-        local_wavlm = backup_root / "wavLM" / "final_model_aug_comb"
+        if is_hubert_actually_wavlm:
+            # First backbone is WavLM, not HuBERT
+            is_first_wavlm_large = "large" in hubert_name.lower()
+            if is_first_wavlm_large:
+                local_first = backup_root / "wavLM_large" / "final_model_aug_comb"
+                if not local_first.exists():
+                    local_first = backup_root / "wavLM_large" / "final_model_aug_comb_weighted"
+                default_hf = "microsoft/wavlm-large"
+            else:
+                local_first = backup_root / "wavLM" / "final_model_aug_comb"
+                default_hf = "microsoft/wavlm-base"
+            
+            if (hubert_name.startswith("/") and not Path(hubert_name).exists()) or local_first.exists():
+                if local_first.exists():
+                    hubert_name = str(local_first)
+                    print(f"   ✓ First backbone (WavLM): using local backup at {hubert_name}")
+                else:
+                    hubert_name = default_hf
+                    print(f"   ⚠️ First backbone path not found, downloading from HuggingFace...")
+        else:
+            # Standard HuBERT fallback
+            local_hubert = backup_root / "hubert_large" / "final_model_hubert"
+            if (hubert_name.startswith("/") and not Path(hubert_name).exists()) or \
+               (hubert_name == "facebook/hubert-large-ls960-ft" and local_hubert.exists()):
+                
+                if local_hubert.exists():
+                    hubert_name = str(local_hubert)
+                    print(f"   ✓ HuBERT: using local backup at {hubert_name}")
+                else:
+                    hubert_name = "facebook/hubert-large-ls960-ft"
+                    print(f"   ⚠️ HuBERT path not found at {local_hubert}, downloading from HuggingFace...")
+        
+        # WavLM fallback logic - detect Large vs Base from config
+        is_wavlm_large = "large" in wavlm_name.lower()
+        if is_wavlm_large:
+            # WavLM Large: check multiple possible paths
+            local_wavlm = backup_root / "wavLM_large" / "final_model_aug_comb"
+            if not local_wavlm.exists():
+                local_wavlm = backup_root / "wavLM_large" / "final_model_aug_comb_weighted"
+            if not local_wavlm.exists():
+                local_wavlm = backup_root / "wavLM_large" / "final_model_wavlm_large"
+            if not local_wavlm.exists():
+                local_wavlm = backup_root / "wavLM_large" / "final_model"
+            default_hf = "microsoft/wavlm-large"
+        else:
+            local_wavlm = backup_root / "wavLM" / "final_model_aug_comb"
+            default_hf = "microsoft/wavlm-base"
+        
         if (wavlm_name.startswith("/") and not Path(wavlm_name).exists()) or \
-           (wavlm_name == "microsoft/wavlm-base" and local_wavlm.exists()):
+           (wavlm_name.startswith("microsoft/wavlm") and local_wavlm.exists()):
             
             if local_wavlm.exists():
                 wavlm_name = str(local_wavlm)
                 print(f"   ✓ WavLM: using local backup at {wavlm_name}")
             else:
-                wavlm_name = "microsoft/wavlm-base"
+                wavlm_name = default_hf
                 print(f"   ⚠️ WavLM path not found at {local_wavlm}, downloading from HuggingFace...")
             
         use_weighted = config.get("use_weighted_wavlm", True)
@@ -701,14 +745,24 @@ def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bo
         class EarlyFusionModel(nn.Module):
             def __init__(self, vocab_size, hubert_name, wavlm_name, use_weighted=True):
                 super().__init__()
-                # Load HuBERT encoder
-                try:
-                    hubert_full = HubertForCTC.from_pretrained(hubert_name)
-                    self.hubert = hubert_full.hubert
-                except:
-                    self.hubert = HubertModel.from_pretrained(hubert_name)
+                # Detect if first backbone is actually WavLM (not HuBERT)
+                is_first_wavlm = "wavlm" in hubert_name.lower() and "hubert" not in hubert_name.lower()
                 
-                # Load WavLM encoder
+                # Load first encoder (HuBERT or WavLM)
+                if is_first_wavlm:
+                    try:
+                        first_full = WavLMForCTC.from_pretrained(hubert_name)
+                        self.hubert = first_full.wavlm
+                    except:
+                        self.hubert = WavLMModel.from_pretrained(hubert_name)
+                else:
+                    try:
+                        hubert_full = HubertForCTC.from_pretrained(hubert_name)
+                        self.hubert = hubert_full.hubert
+                    except:
+                        self.hubert = HubertModel.from_pretrained(hubert_name)
+                
+                # Load WavLM encoder (second backbone)
                 try:
                     wavlm_full = WavLMForCTC.from_pretrained(wavlm_name)
                     self.wavlm = wavlm_full.wavlm
@@ -800,6 +854,220 @@ def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bo
                 loaded_keys.append(key)
         model.load_state_dict(model_state)
         print(f"   ✓ EarlyFusionModel caricato da {model_file.name}")
+        print(f"   ✓ Loaded keys: {len(loaded_keys)} ({', '.join(loaded_keys[:5])}...)")
+        
+    elif is_gated_fusion:
+        print("   Tipo: GatedFusionModel (HuBERT + WavLM con Gate)")
+        vocab_size = config.get("vocab_size", 45)
+        
+        # Get encoder paths from config
+        hubert_name = config.get("hubert_name", "facebook/hubert-large-ls960-ft")
+        wavlm_name = config.get("wavlm_name", "microsoft/wavlm-base")
+        
+        # Backup path logic (same as Early Fusion)
+        model_base = Path(model_path).parent
+        if "checkpoint-" in str(Path(model_path).name):
+            backup_root = model_base.parent.parent
+        else:
+            backup_root = model_base.parent
+        
+        # First backbone fallback - detect if it's actually WavLM from config path
+        is_hubert_actually_wavlm = "wavlm" in hubert_name.lower() and "hubert" not in hubert_name.lower()
+        
+        if is_hubert_actually_wavlm:
+            # First backbone is WavLM, not HuBERT
+            is_first_wavlm_large = "large" in hubert_name.lower()
+            if is_first_wavlm_large:
+                local_first = backup_root / "wavLM_large" / "final_model_aug_comb"
+                if not local_first.exists():
+                    local_first = backup_root / "wavLM_large" / "final_model_aug_comb_weighted"
+                default_hf = "microsoft/wavlm-large"
+            else:
+                local_first = backup_root / "wavLM" / "final_model_aug_comb"
+                default_hf = "microsoft/wavlm-base"
+            
+            if (hubert_name.startswith("/") and not Path(hubert_name).exists()) or local_first.exists():
+                if local_first.exists():
+                    hubert_name = str(local_first)
+                    print(f"   ✓ First backbone (WavLM): using local backup at {hubert_name}")
+                else:
+                    hubert_name = default_hf
+                    print(f"   ⚠️ First backbone path not found, downloading from HuggingFace...")
+        else:
+            # Standard HuBERT fallback
+            local_hubert = backup_root / "hubert_large" / "final_model_hubert"
+            if (hubert_name.startswith("/") and not Path(hubert_name).exists()) or \
+               (hubert_name == "facebook/hubert-large-ls960-ft" and local_hubert.exists()):
+                if local_hubert.exists():
+                    hubert_name = str(local_hubert)
+                    print(f"   ✓ HuBERT: using local backup at {hubert_name}")
+                else:
+                    hubert_name = "facebook/hubert-large-ls960-ft"
+                    print(f"   ⚠️ HuBERT path not found, downloading from HuggingFace...")
+        
+        # WavLM fallback - detect Large vs Base
+        is_wavlm_large = "large" in wavlm_name.lower()
+        if is_wavlm_large:
+            local_wavlm = backup_root / "wavLM_large" / "final_model_aug_comb"
+            if not local_wavlm.exists():
+                local_wavlm = backup_root / "wavLM_large" / "final_model_aug_comb_weighted"
+            default_hf = "microsoft/wavlm-large"
+        else:
+            local_wavlm = backup_root / "wavLM" / "final_model_aug_comb"
+            default_hf = "microsoft/wavlm-base"
+        
+        if (wavlm_name.startswith("/") and not Path(wavlm_name).exists()) or \
+           (wavlm_name.startswith("microsoft/wavlm") and local_wavlm.exists()):
+            if local_wavlm.exists():
+                wavlm_name = str(local_wavlm)
+                print(f"   ✓ WavLM: using local backup at {wavlm_name}")
+            else:
+                wavlm_name = default_hf
+                print(f"   ⚠️ WavLM path not found, downloading from HuggingFace...")
+        
+        use_weighted = config.get("use_weighted_wavlm", True)
+        
+        from typing import Tuple, Optional, Dict
+        from transformers import HubertModel, HubertForCTC
+        from transformers.models.wavlm import WavLMModel, WavLMForCTC
+        
+        class GatedFusionModel(nn.Module):
+            def __init__(self, vocab_size, hubert_name, wavlm_name, use_weighted=True):
+                super().__init__()
+                # Detect if first backbone is actually WavLM (not HuBERT)
+                is_first_wavlm = "wavlm" in hubert_name.lower() and "hubert" not in hubert_name.lower()
+                
+                # Load first encoder (HuBERT or WavLM)
+                if is_first_wavlm:
+                    try:
+                        first_full = WavLMForCTC.from_pretrained(hubert_name)
+                        self.hubert = first_full.wavlm
+                    except:
+                        self.hubert = WavLMModel.from_pretrained(hubert_name)
+                else:
+                    try:
+                        hubert_full = HubertForCTC.from_pretrained(hubert_name)
+                        self.hubert = hubert_full.hubert
+                    except:
+                        self.hubert = HubertModel.from_pretrained(hubert_name)
+                
+                # Load WavLM encoder (second backbone)
+                try:
+                    wavlm_full = WavLMForCTC.from_pretrained(wavlm_name)
+                    self.wavlm = wavlm_full.wavlm
+                except:
+                    self.wavlm = WavLMModel.from_pretrained(wavlm_name)
+                
+                # Weighted layer sum for WavLM
+                self.use_weighted = use_weighted
+                if use_weighted:
+                    num_layers = self.wavlm.config.num_hidden_layers + 1
+                    self.layer_weights = nn.Parameter(torch.zeros(num_layers))
+                    self.wavlm.config.output_hidden_states = True
+                
+                # Dimension alignment for fusion
+                hidden_size_h = self.hubert.config.hidden_size
+                hidden_size_w = self.wavlm.config.hidden_size
+                self.fused_hidden_size = max(hidden_size_h, hidden_size_w)
+                
+                # Projection layers if dimensions differ
+                self.proj_hubert = None
+                self.proj_wavlm = None
+                if hidden_size_h != self.fused_hidden_size:
+                    self.proj_hubert = nn.Linear(hidden_size_h, self.fused_hidden_size)
+                if hidden_size_w != self.fused_hidden_size:
+                    self.proj_wavlm = nn.Linear(hidden_size_w, self.fused_hidden_size)
+                
+                # Gate Network
+                combined_size = self.fused_hidden_size * 2
+                self.gate_network = nn.Linear(combined_size, 1)
+                
+                # CTC Head
+                self.dropout = nn.Dropout(0.1)
+                self.ctc_head = nn.Linear(self.fused_hidden_size, vocab_size)
+            
+            def _get_wavlm_weighted_output(self, hidden_states):
+                weights = F.softmax(self.layer_weights, dim=0)
+                stacked = torch.stack(hidden_states, dim=0)
+                weights_view = weights.view(-1, 1, 1, 1)
+                return (stacked * weights_view).sum(dim=0)
+            
+            def forward(self, input_values, attention_mask=None, **kwargs):
+                target_dtype = next(self.hubert.parameters()).dtype
+                if input_values.dtype != target_dtype:
+                    input_values = input_values.to(target_dtype)
+                
+                with torch.no_grad():
+                    h_h = self.hubert(input_values, attention_mask=attention_mask).last_hidden_state.clone()
+                    outputs_w = self.wavlm(input_values, attention_mask=attention_mask)
+                    if self.use_weighted and hasattr(outputs_w, 'hidden_states') and outputs_w.hidden_states:
+                        h_w = self._get_wavlm_weighted_output(outputs_w.hidden_states).clone()
+                    else:
+                        h_w = outputs_w.last_hidden_state.clone()
+                
+                # Align temporal dimension
+                min_len = min(h_h.size(1), h_w.size(1))
+                h_h = h_h[:, :min_len, :]
+                h_w = h_w[:, :min_len, :]
+                
+                # Project to same dimension if needed
+                if self.proj_hubert is not None:
+                    h_h = self.proj_hubert(h_h)
+                if self.proj_wavlm is not None:
+                    h_w = self.proj_wavlm(h_w)
+                
+                # Gate calculation
+                gate_input = torch.cat([h_h, h_w], dim=-1)
+                gate = torch.sigmoid(self.gate_network(gate_input))
+                
+                # Fused representation
+                h_fused = gate * h_h + (1 - gate) * h_w
+                logits = self.ctc_head(self.dropout(h_fused))
+                return {"logits": logits, "gate_values": gate}
+        
+        model = GatedFusionModel(vocab_size, hubert_name, wavlm_name, use_weighted)
+        
+        # Load trained weights
+        model_dir = Path(model_path)
+        possible_files = [
+            model_dir / "pytorch_model.bin",
+            model_dir / "model.safetensors",
+            model_dir / "model.bin",
+        ]
+        
+        model_file = None
+        for pf in possible_files:
+            if pf.exists():
+                model_file = pf
+                break
+        
+        if model_file is None:
+            raise FileNotFoundError(f"No model file found in {model_path}")
+        
+        state_dict = None
+        if model_file.suffix == ".safetensors":
+            try:
+                from safetensors.torch import load_file
+                state_dict = load_file(str(model_file))
+            except Exception as e:
+                print(f"   ⚠️ safetensors load failed: {e}")
+                alt_file = model_dir / "pytorch_model.bin"
+                if alt_file.exists():
+                    state_dict = torch.load(alt_file, map_location="cpu", weights_only=False)
+                else:
+                    raise ValueError(f"Cannot load model: safetensors corrupted and no pytorch_model.bin found")
+        else:
+            state_dict = torch.load(model_file, map_location="cpu", weights_only=False)
+        
+        # Load trained parts
+        model_state = model.state_dict()
+        loaded_keys = []
+        for key in state_dict:
+            if key in model_state:
+                model_state[key] = state_dict[key]
+                loaded_keys.append(key)
+        model.load_state_dict(model_state)
+        print(f"   ✓ GatedFusionModel caricato da {model_file.name}")
         print(f"   ✓ Loaded keys: {len(loaded_keys)} ({', '.join(loaded_keys[:5])}...)")
         
     elif is_speechtokenizer:
@@ -1365,8 +1633,8 @@ def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bo
                 with torch.no_grad():
                     outputs = model(input_features)
                     logits = outputs["logits"]
-            elif is_early_fusion:
-                # Early Fusion uses raw audio directly, no processor needed for input
+            elif is_early_fusion or is_gated_fusion:
+                # Early/Gated Fusion uses raw audio directly, no processor needed for input
                 # Just convert audio arrays to tensors
                 max_len = max(len(a) for a in audio_arrays)
                 padded_audio = []
@@ -1438,7 +1706,7 @@ def evaluate_speechocean(model_path: str, verbose: bool = True, full_dataset: bo
             )
             
             # Apply CTC greedy decoding for models that need it
-            if is_whisper_encoder or is_qwen_audio or is_early_fusion:
+            if is_whisper_encoder or is_qwen_audio or is_early_fusion or is_gated_fusion:
                 # Decode each sequence with CTC blank/repeat collapsing
                 predicted_texts = []
                 for seq in predicted_ids:

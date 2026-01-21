@@ -266,30 +266,52 @@ class GatedFusionModel(nn.Module):
         print(f"   Dropout rate: {dropout_rate}")
         
         # =====================================================================
-        # STEP 2: Carica HuBERT backbone
-        # Supporta sia HubertModel base che HubertForCTC (checkpoint fine-tuned)
+        # STEP 2: Carica primo backbone (HuBERT o WavLM)
+        # Detecta automaticamente se hubert_name è in realtà un modello WavLM
+        # Supporta sia *Model base che *ForCTC (checkpoint fine-tuned)
         # =====================================================================
-        print(f"\n📦 Loading HuBERT from: {hubert_name}")
-        try:
-            # Prima prova a caricare come HubertForCTC (modello fine-tuned)
-            from transformers import HubertForCTC
-            hubert_full = HubertForCTC.from_pretrained(
-                hubert_name,
-                torch_dtype=torch.float16,  # FP16 per ridurre VRAM
-            )
-            self.hubert = hubert_full.hubert
-            hubert_size = "Large" if self.hubert.config.hidden_size >= 1024 else "Base"
-            print(f"   ✓ HuBERT: Loaded from ForCTC ({hubert_size}, {self.hubert.config.hidden_size}D)")
-        except Exception as e:
-            # Fallback: carica come HubertModel base
-            print(f"   ⚠️ ForCTC load failed: {e}")
-            self.hubert = HubertModel.from_pretrained(
-                hubert_name,
-                output_hidden_states=False,
-                torch_dtype=torch.float16,
-            )
-            hubert_size = "Large" if self.hubert.config.hidden_size >= 1024 else "Base"
-            print(f"   ✓ HuBERT: Loaded as base Model ({hubert_size}, {self.hubert.config.hidden_size}D)")
+        is_first_wavlm = "wavlm" in hubert_name.lower() and "hubert" not in hubert_name.lower()
+        
+        if is_first_wavlm:
+            print(f"\n📦 Loading First Backbone (WavLM) from: {hubert_name}")
+            try:
+                from transformers import WavLMForCTC
+                first_full = WavLMForCTC.from_pretrained(
+                    hubert_name,
+                    torch_dtype=torch.float16,
+                )
+                self.hubert = first_full.wavlm
+                first_size = "Large" if self.hubert.config.hidden_size >= 1024 else "Base"
+                print(f"   ✓ First Backbone (WavLM): Loaded from ForCTC ({first_size}, {self.hubert.config.hidden_size}D)")
+            except Exception as e:
+                print(f"   ⚠️ ForCTC load failed: {e}")
+                self.hubert = WavLMModel.from_pretrained(
+                    hubert_name,
+                    output_hidden_states=False,
+                    torch_dtype=torch.float16,
+                )
+                first_size = "Large" if self.hubert.config.hidden_size >= 1024 else "Base"
+                print(f"   ✓ First Backbone (WavLM): Loaded as base Model ({first_size}, {self.hubert.config.hidden_size}D)")
+        else:
+            print(f"\n📦 Loading HuBERT from: {hubert_name}")
+            try:
+                from transformers import HubertForCTC
+                hubert_full = HubertForCTC.from_pretrained(
+                    hubert_name,
+                    torch_dtype=torch.float16,
+                )
+                self.hubert = hubert_full.hubert
+                hubert_size = "Large" if self.hubert.config.hidden_size >= 1024 else "Base"
+                print(f"   ✓ HuBERT: Loaded from ForCTC ({hubert_size}, {self.hubert.config.hidden_size}D)")
+            except Exception as e:
+                print(f"   ⚠️ ForCTC load failed: {e}")
+                self.hubert = HubertModel.from_pretrained(
+                    hubert_name,
+                    output_hidden_states=False,
+                    torch_dtype=torch.float16,
+                )
+                hubert_size = "Large" if self.hubert.config.hidden_size >= 1024 else "Base"
+                print(f"   ✓ HuBERT: Loaded as base Model ({hubert_size}, {self.hubert.config.hidden_size}D)")
         
         # =====================================================================
         # STEP 3: Carica WavLM backbone
@@ -925,8 +947,31 @@ class GatedFusionTrainerWrapper:
         def compute_metrics(pred):
             """Calcola metriche di valutazione."""
             pred_logits = pred.predictions
+            
+            # Handle dict or tuple outputs from model
             if isinstance(pred_logits, dict):
                 pred_logits = pred_logits["logits"]
+            elif isinstance(pred_logits, tuple):
+                # Trainer sometimes wraps predictions in tuple, take first element
+                pred_logits = pred_logits[0]
+            
+            # Handle variable length sequences - pad to max length
+            if isinstance(pred_logits, (list, tuple)) or (isinstance(pred_logits, np.ndarray) and pred_logits.dtype == object):
+                # Sequences have variable length, pad them
+                max_len = max(len(seq) if hasattr(seq, '__len__') else seq.shape[0] for seq in pred_logits)
+                padded = []
+                for seq in pred_logits:
+                    if hasattr(seq, 'shape'):
+                        seq_arr = np.array(seq)
+                    else:
+                        seq_arr = np.array(seq)
+                    if len(seq_arr.shape) == 2:  # [time, vocab]
+                        if seq_arr.shape[0] < max_len:
+                            pad_width = ((0, max_len - seq_arr.shape[0]), (0, 0))
+                            seq_arr = np.pad(seq_arr, pad_width, mode='constant', constant_values=-100)
+                    padded.append(seq_arr)
+                pred_logits = np.stack(padded, axis=0)
+            
             pred_ids = np.argmax(pred_logits, axis=-1)
             
             pred_str = self.processor.batch_decode(pred_ids)
