@@ -250,8 +250,12 @@ class GatedFusionModel(nn.Module):
         freeze_backbones: bool = True,
         dropout_rate: float = 0.1,
         use_weighted_wavlm: bool = True,
+        gate_reg_coef: float = 0.1,  # Coefficiente regolarizzazione gate
     ):
         super().__init__()
+        
+        # Store gate regularization coefficient
+        self.gate_reg_coef = gate_reg_coef
         
         # =====================================================================
         # STEP 1: Logging configurazione
@@ -264,6 +268,7 @@ class GatedFusionModel(nn.Module):
         print(f"   Weighted WavLM: {use_weighted_wavlm}")
         print(f"   Freeze backbones: {freeze_backbones}")
         print(f"   Dropout rate: {dropout_rate}")
+        print(f"   Gate regularization: {gate_reg_coef}")
         
         # =====================================================================
         # STEP 2: Carica primo backbone (HuBERT o WavLM)
@@ -578,7 +583,21 @@ class GatedFusionModel(nn.Module):
         # =====================================================================
         loss = None
         if labels is not None:
-            loss = self._compute_ctc_loss(logits, labels, attention_mask)
+            ctc_loss = self._compute_ctc_loss(logits, labels, attention_mask)
+            
+            # Gate entropy regularization: penalizza gate troppo vicini a 0 o 1
+            # Entropy = -p*log(p) - (1-p)*log(1-p), max quando p=0.5
+            # Vogliamo MASSIMIZZARE entropy → MINIMIZZARE negative entropy
+            eps = 1e-7
+            gate_entropy = -(gate * torch.log(gate + eps) + (1 - gate) * torch.log(1 - gate + eps))
+            gate_entropy_mean = gate_entropy.mean()
+            
+            # Regularization: negative entropy (vogliamo alta entropy = gate bilanciato)
+            # gate_reg_coef controlla quanto penalizzare gate sbilanciati
+            gate_reg_coef = getattr(self, 'gate_reg_coef', 0.1)
+            gate_reg_loss = -gate_reg_coef * gate_entropy_mean
+            
+            loss = ctc_loss + gate_reg_loss
         
         return {
             "logits": logits,
@@ -848,6 +867,7 @@ class GatedFusionTrainerWrapper:
             freeze_backbones=self.config["model"].get("freeze_backbones", True),
             dropout_rate=self.config["model"].get("dropout_rate", 0.1),
             use_weighted_wavlm=self.config["model"].get("use_weighted_wavlm", True),
+            gate_reg_coef=self.config["model"].get("gate_reg_coef", 0.1),
         )
         
         # Abilita gradient checkpointing per ridurre VRAM
@@ -1228,6 +1248,12 @@ def main():
         action="store_true",
         help="Resume da ultimo checkpoint"
     )
+    parser.add_argument(
+        "--gate-reg",
+        type=float,
+        default=0.1,
+        help="Gate regularization coefficient (0.1 default, higher = more balanced gate)"
+    )
     
     args = parser.parse_args()
     
@@ -1249,6 +1275,7 @@ def main():
                 "freeze_backbones": True,
                 "dropout_rate": 0.1,
                 "use_weighted_wavlm": not args.no_weighted,
+                "gate_reg_coef": args.gate_reg,
             },
             "training": {
                 "output_dir": args.output_dir,
