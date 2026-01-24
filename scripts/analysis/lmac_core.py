@@ -487,12 +487,13 @@ class LMACWrapper(nn.Module):
         removed_audio = input_values.to(self.device) * (1.0 - mask)
 
         # Forward for fidelity losses (no grad on params, but grad wrt mask/input)
+        attention_mask_device = attention_mask.to(self.device)
         if self.backbone_type == "hubert":
-            logits_in = self.backbone(masked_audio, attention_mask=attention_mask, return_dict=True).logits
-            logits_out = self.backbone(removed_audio, attention_mask=attention_mask, return_dict=True).logits
+            logits_in = self.backbone(masked_audio, attention_mask=attention_mask_device, return_dict=True).logits
+            logits_out = self.backbone(removed_audio, attention_mask=attention_mask_device, return_dict=True).logits
         else:
-            logits_in = self.backbone(masked_audio, attention_mask=attention_mask)["logits"]
-            logits_out = self.backbone(removed_audio, attention_mask=attention_mask)["logits"]
+            logits_in = self.backbone(masked_audio, attention_mask=attention_mask_device)["logits"]
+            logits_out = self.backbone(removed_audio, attention_mask=attention_mask_device)["logits"]
 
         # Average over time with mask
         feat_mask = self._feat_mask_from_attention(attention_mask, logits_in.size(1))
