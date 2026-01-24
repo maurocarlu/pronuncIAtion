@@ -178,8 +178,23 @@ class _ConvBlock(nn.Module):
 class LMACDecoder(nn.Module):
     """Lightweight 1D U-Net decoder for mask prediction."""
 
-    def __init__(self, in_ch: int, base_ch: int = 128):
+    def __init__(
+        self,
+        in_ch: int,
+        base_ch: int = 128,
+        use_conditioning: bool = False,
+        vocab_size: int = 0,
+        embedding_dim: int = 64,
+    ):
         super().__init__()
+        self.use_conditioning = use_conditioning
+        
+        if use_conditioning:
+            if vocab_size <= 0:
+                raise ValueError("vocab_size must be > 0 when use_conditioning=True")
+            self.embedding = nn.Embedding(vocab_size, embedding_dim)
+            in_ch += embedding_dim
+            
         self.enc1 = _ConvBlock(in_ch, base_ch)
         self.down1 = nn.Conv1d(base_ch, base_ch * 2, kernel_size=4, stride=2, padding=1)
         self.enc2 = _ConvBlock(base_ch * 2, base_ch * 2)
@@ -193,8 +208,19 @@ class LMACDecoder(nn.Module):
 
         self.out_conv = nn.Conv1d(base_ch, 1, kernel_size=1)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, target_ids: Optional[torch.Tensor] = None) -> torch.Tensor:
         # x: [B, C, T]
+        if self.use_conditioning:
+            if target_ids is None:
+                raise ValueError("target_ids required for conditional decoder")
+            
+            # Embed target phoneme: [B] -> [B, emb_dim]
+            emb = self.embedding(target_ids)
+            # Expand to time dimension: [B, emb_dim, T]
+            emb = emb.unsqueeze(-1).expand(-1, -1, x.size(-1))
+            # Concatenate along channel dimension
+            x = torch.cat([x, emb], dim=1)
+            
         e1 = self.enc1(x)
         d1 = self.down1(e1)
         e2 = self.enc2(d1)
@@ -227,6 +253,9 @@ class LMACBackboneConfig:
     wavlm_name: str = "microsoft/wavlm-large"
     use_weighted_wavlm: bool = True
     layer_ids: Tuple[int, ...] = (6, 12, 18, 24)
+    use_conditioning: bool = False
+    vocab_size: int = 0  # Required if use_conditioning=True
+    embedding_dim: int = 64
 
 
 class _LMACEarlyFusionModel(nn.Module):
@@ -322,7 +351,12 @@ class LMACWrapper(nn.Module):
         self._init_tokenizer()
 
         in_ch = self._compute_decoder_in_channels()
-        self.decoder = LMACDecoder(in_ch=in_ch).to(self.device)
+        self.decoder = LMACDecoder(
+            in_ch=in_ch,
+            use_conditioning=config.use_conditioning,
+            vocab_size=config.vocab_size,
+            embedding_dim=config.embedding_dim,
+        ).to(self.device)
 
         for p in self.backbone.parameters():
             p.requires_grad = False
@@ -436,7 +470,12 @@ class LMACWrapper(nn.Module):
         mask = F.interpolate(mask, size=feat_len, mode="nearest")
         return mask.squeeze(1)  # [B, T_feat]
 
-    def forward(self, input_values: torch.Tensor, attention_mask: torch.Tensor) -> Dict[str, torch.Tensor]:
+    def forward(
+        self, 
+        input_values: torch.Tensor, 
+        attention_mask: torch.Tensor,
+        target_ids: Optional[torch.Tensor] = None
+    ) -> Dict[str, torch.Tensor]:
         input_values = input_values.to(self.device)
         attention_mask = attention_mask.to(self.device)
 
@@ -465,7 +504,24 @@ class LMACWrapper(nn.Module):
 
         # Decoder expects [B, C, T_feat]
         feats = feats.transpose(1, 2)
-        m_feat = self.decoder(feats)  # [B,1,T_feat]
+        
+        # Prepare target_ids for conditioning if needed
+        decoder_target_ids = None
+        if self.config.use_conditioning:
+            if target_ids is not None:
+                decoder_target_ids = target_ids
+            elif self.target_id is not None:
+                # Use fixed target_id for all samples if available (single-phoneme mode or inference)
+                decoder_target_ids = torch.full(
+                    (feats.size(0),), 
+                    self.target_id, 
+                    device=self.device, 
+                    dtype=torch.long
+                )
+            else:
+                 raise ValueError("Decoder requires conditioning but no target_ids provided and self.target_id is None")
+
+        m_feat = self.decoder(feats, target_ids=decoder_target_ids)  # [B,1,T_feat]
 
         # Upsample mask to waveform length
         mask = F.interpolate(m_feat, size=input_values.size(1), mode="linear", align_corners=False)
@@ -486,7 +542,25 @@ class LMACWrapper(nn.Module):
         lambda_reg: float = 1e-4,
         eps: float = 1e-8,
     ) -> Dict[str, torch.Tensor]:
-        out = self.forward(input_values, attention_mask)
+        # Resolve target IDs for conditioning (if enabled)
+        target_ids = None
+        if self.config.use_conditioning:
+            if target_phonemes is not None:
+                # Convert list of phonemes to tensor of IDs
+                tids = []
+                for ph in target_phonemes:
+                    tids.append(self.vocab.get(ph, 0)) # 0 as fallback
+                target_ids = torch.tensor(tids, device=self.device, dtype=torch.long)
+            elif self.target_id is not None:
+                # Single-phoneme mode
+                target_ids = torch.full(
+                    (input_values.size(0),), 
+                    self.target_id, 
+                    device=self.device, 
+                    dtype=torch.long
+                )
+        
+        out = self.forward(input_values, attention_mask, target_ids=target_ids)
         mask = out["mask"]
 
         masked_audio = input_values.to(self.device) * mask
@@ -557,6 +631,7 @@ def generate_listenable_map(
     audio_path: str,
     out_dir: str,
     prefix: str = "lmac",
+    target_phoneme: Optional[str] = None,
 ) -> Dict[str, str]:
     import soundfile as sf
     import matplotlib.pyplot as plt
@@ -568,8 +643,21 @@ def generate_listenable_map(
     input_values = torch.tensor(audio_arr[None, :], dtype=torch.float32)
     attn_mask = torch.ones_like(input_values, dtype=torch.long)
 
+    # Resolve target_ids if conditional
+    target_ids = None
+    if wrapper.config.use_conditioning:
+        curr_target = target_phoneme if target_phoneme else wrapper.target_phoneme
+        if curr_target:
+             tid = wrapper.vocab.get(curr_target, 0)
+             target_ids = torch.tensor([tid], dtype=torch.long, device=wrapper.device)
+        else:
+            # If no target specified and wrapper has none, this is ambiguous for conditional model
+            # We can try to infer from filename/metadata or just error/warn. 
+            # For now let's error if strictly required
+             raise ValueError("Conditional L-MAC requires a target_phoneme for map generation.")
+
     with torch.no_grad():
-        out = wrapper.forward(input_values, attn_mask)
+        out = wrapper.forward(input_values, attn_mask, target_ids=target_ids)
     mask = out["mask"].cpu().numpy()[0]
 
     masked_audio = audio_arr * mask
@@ -585,7 +673,9 @@ def generate_listenable_map(
 
     ax2 = fig.add_subplot(3, 1, 2)
     ax2.imshow(mask[None, :], aspect="auto", cmap="magma")
-    ax2.set_title("Maschera L-MAC")
+    
+    label_target = target_phoneme if target_phoneme else (wrapper.target_phoneme or "Unknown")
+    ax2.set_title(f"Maschera L-MAC (Target: /{label_target}/)")
 
     ax3 = fig.add_subplot(3, 1, 3)
     try:
@@ -645,8 +735,22 @@ def compute_ai_ad(
         input_values = batch["input_values"].to(wrapper.device)
         attention_mask = batch["attention_mask"].to(wrapper.device)
 
+        # Prepare target_ids for conditional forward
+        target_ids = None
+        batch_target_phonemes = []
+        if is_multi_phoneme:
+            batch_target_phonemes = batch.get("target_phoneme", [])
+            if wrapper.config.use_conditioning:
+                tids = [wrapper.vocab.get(ph, 0) for ph in batch_target_phonemes]
+                target_ids = torch.tensor(tids, device=wrapper.device, dtype=torch.long)
+        else:
+            batch_target_phonemes = [wrapper.target_phoneme] * logits_clean.size(0)
+            if wrapper.config.use_conditioning:
+                # wrapper.target_id should be set
+                target_ids = torch.full((logits_clean.size(0),), wrapper.target_id, device=wrapper.device, dtype=torch.long)
+
         with torch.no_grad():
-            out = wrapper.forward(input_values, attention_mask)
+            out = wrapper.forward(input_values, attention_mask, target_ids=target_ids)
             mask = out["mask"]
 
             # clean logits

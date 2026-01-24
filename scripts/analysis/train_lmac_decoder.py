@@ -35,16 +35,35 @@ def parse_args():
     parser.add_argument("--max-samples", type=int, default=None)
     parser.add_argument("--log-interval", type=int, default=50)
     parser.add_argument("--output-dir", type=str, default="outputs/lmac")
+    parser.add_argument("--use-conditioning", action="store_true", help="Enable conditional decoder (required for multi-phoneme)")
     return parser.parse_args()
 
 
 def train_lmac(args) -> Path:
     layer_ids = tuple(int(x.strip()) for x in args.layer_ids.split(",") if x.strip())
+    
+    # Pre-load tokenizer to get vocab size if conditioning is enabled
+    vocab_size = 0
+    if args.use_conditioning:
+        from transformers import Wav2Vec2CTCTokenizer
+        try:
+             # Try loading tokenizer from model path
+             tokenizer = Wav2Vec2CTCTokenizer.from_pretrained(args.model_path)
+             vocab_size = len(tokenizer)
+        except Exception as e:
+            # Fallback for EarlyFusion where model_path might differ or specific structure
+            print(f"⚠️ Could not load tokenizer directly from {args.model_path}: {e}")
+            # Try loading from standard Hubert path as fallback (common vocab)
+            tokenizer = Wav2Vec2CTCTokenizer.from_pretrained("facebook/hubert-large-ls960-ft")
+            vocab_size = len(tokenizer)
+        print(f"🧠 Conditioning enabled. Vocab size: {vocab_size}")
 
     config = LMACBackboneConfig(
         backbone_type=args.backbone,
         model_path=args.model_path,
         layer_ids=layer_ids,
+        use_conditioning=args.use_conditioning,
+        vocab_size=vocab_size,
     )
 
     # Support None for multi-phoneme mode
@@ -122,7 +141,10 @@ def train_lmac(args) -> Path:
                 "is_multi_phoneme": is_multi_phoneme,
                 "layer_ids": layer_ids,
                 "backbone": args.backbone,
+                "backbone": args.backbone,
                 "model_path": args.model_path,
+                "use_conditioning": args.use_conditioning,
+                "vocab_size": vocab_size,
             },
             output_dir / f"decoder_epoch_{epoch}.pt",
         )
@@ -135,7 +157,10 @@ def train_lmac(args) -> Path:
             "is_multi_phoneme": is_multi_phoneme,
             "layer_ids": layer_ids,
             "backbone": args.backbone,
+            "backbone": args.backbone,
             "model_path": args.model_path,
+            "use_conditioning": args.use_conditioning,
+            "vocab_size": vocab_size,
         },
         output_dir / "decoder_final.pt",
     )
