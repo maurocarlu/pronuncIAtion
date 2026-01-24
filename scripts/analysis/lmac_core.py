@@ -624,12 +624,17 @@ def compute_ai_ad(
     wrapper: LMACWrapper,
     dataloader: torch.utils.data.DataLoader,
     max_batches: Optional[int] = None,
-) -> Dict[str, float]:
+) -> Dict[str, Any]:
     """Compute Average Increase (AI) and Average Drop (AD) on test set."""
     wrapper.eval()
+    
+    # Global stats
     ai_hits = 0
     n = 0
     ad_sum = 0.0
+    
+    # Per-phoneme stats
+    phoneme_stats = {}  # ph -> {'ai_hits': 0, 'ad_sum': 0.0, 'n': 0}
     
     is_multi_phoneme = wrapper.target_id is None
 
@@ -659,34 +664,58 @@ def compute_ai_ad(
         # Average prob for target class
         feat_mask = wrapper._feat_mask_from_attention(attention_mask, logits_clean.size(1)).to(logits_clean.device)
         
-        # Multi-phoneme mode: use per-sample target from batch
+        batch_target_phonemes = []
         if is_multi_phoneme:
-            batch_size = logits_clean.size(0)
-            target_phonemes = batch.get("target_phoneme", [])
+            batch_target_phonemes = batch.get("target_phoneme", [])
             probs_clean_list = []
             probs_masked_list = []
-            for i, ph in enumerate(target_phonemes):
+            for i, ph in enumerate(batch_target_phonemes):
                 tid = wrapper.vocab.get(ph, 0)
                 probs_clean_list.append(F.softmax(logits_clean[i], dim=-1)[:, tid])
                 probs_masked_list.append(F.softmax(logits_masked[i], dim=-1)[:, tid])
-            probs_clean = torch.stack(probs_clean_list, dim=0)  # [B, T]
+            probs_clean = torch.stack(probs_clean_list, dim=0)
             probs_masked = torch.stack(probs_masked_list, dim=0)
         else:
             probs_clean = F.softmax(logits_clean, dim=-1)[..., wrapper.target_id]
             probs_masked = F.softmax(logits_masked, dim=-1)[..., wrapper.target_id]
+            batch_target_phonemes = [wrapper.target_phoneme] * logits_clean.size(0)
 
         p_clean = (probs_clean * feat_mask).sum(dim=1) / (feat_mask.sum(dim=1) + 1e-8)
         p_masked = (probs_masked * feat_mask).sum(dim=1) / (feat_mask.sum(dim=1) + 1e-8)
 
-        ai_hits += (p_masked > p_clean).float().sum().item()
+        # Update global stats
+        hits = (p_masked > p_clean).float()
         ad = torch.clamp(p_clean - p_masked, min=0.0) / (p_clean + 1e-8)
+        
+        ai_hits += hits.sum().item()
         ad_sum += ad.sum().item()
         n += p_clean.numel()
+        
+        # Update per-phoneme stats
+        for i, ph in enumerate(batch_target_phonemes):
+            if ph not in phoneme_stats:
+                phoneme_stats[ph] = {'ai_hits': 0, 'ad_sum': 0.0, 'n': 0}
+            
+            phoneme_stats[ph]['ai_hits'] += hits[i].item()
+            phoneme_stats[ph]['ad_sum'] += ad[i].item()
+            phoneme_stats[ph]['n'] += 1
 
     if n == 0:
         return {"AI": 0.0, "AD": 0.0}
-
-    return {
+        
+    results = {
         "AI": 100.0 * ai_hits / n,
         "AD": ad_sum / n,
+        "per_phoneme": {}
     }
+    
+    # Calculate aggregated per-phoneme metrics
+    for ph, stats in phoneme_stats.items():
+        if stats['n'] > 0:
+            results["per_phoneme"][ph] = {
+                "AI": 100.0 * stats['ai_hits'] / stats['n'],
+                "AD": stats['ad_sum'] / stats['n'],
+                "count": stats['n']
+            }
+            
+    return results
