@@ -514,7 +514,7 @@ class LMACWrapper(nn.Module):
         loss_fid_out = p_out_mean.mean()
 
         # L1 sparsity on mask
-        valid = attention_mask.float()
+        valid = attention_mask.to(self.device).float()
         loss_reg = (mask.abs() * valid).sum() / (valid.sum() + eps)
 
         total = loss_fid_in + lambda_out * loss_fid_out + lambda_reg * loss_reg
