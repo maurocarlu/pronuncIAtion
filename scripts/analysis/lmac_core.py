@@ -630,6 +630,8 @@ def compute_ai_ad(
     ai_hits = 0
     n = 0
     ad_sum = 0.0
+    
+    is_multi_phoneme = wrapper.target_id is None
 
     for b_idx, batch in enumerate(dataloader):
         if max_batches is not None and b_idx >= max_batches:
@@ -656,8 +658,22 @@ def compute_ai_ad(
 
         # Average prob for target class
         feat_mask = wrapper._feat_mask_from_attention(attention_mask, logits_clean.size(1)).to(logits_clean.device)
-        probs_clean = F.softmax(logits_clean, dim=-1)[..., wrapper.target_id]
-        probs_masked = F.softmax(logits_masked, dim=-1)[..., wrapper.target_id]
+        
+        # Multi-phoneme mode: use per-sample target from batch
+        if is_multi_phoneme:
+            batch_size = logits_clean.size(0)
+            target_phonemes = batch.get("target_phoneme", [])
+            probs_clean_list = []
+            probs_masked_list = []
+            for i, ph in enumerate(target_phonemes):
+                tid = wrapper.vocab.get(ph, 0)
+                probs_clean_list.append(F.softmax(logits_clean[i], dim=-1)[:, tid])
+                probs_masked_list.append(F.softmax(logits_masked[i], dim=-1)[:, tid])
+            probs_clean = torch.stack(probs_clean_list, dim=0)  # [B, T]
+            probs_masked = torch.stack(probs_masked_list, dim=0)
+        else:
+            probs_clean = F.softmax(logits_clean, dim=-1)[..., wrapper.target_id]
+            probs_masked = F.softmax(logits_masked, dim=-1)[..., wrapper.target_id]
 
         p_clean = (probs_clean * feat_mask).sum(dim=1) / (feat_mask.sum(dim=1) + 1e-8)
         p_masked = (probs_masked * feat_mask).sum(dim=1) / (feat_mask.sum(dim=1) + 1e-8)
