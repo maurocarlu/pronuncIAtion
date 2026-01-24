@@ -124,6 +124,18 @@ Combinazione dei due top-performer a livello logit:
 **Script**: `scripts/training/train_early_fusion.py`
 **Args**: `--wavlm-path <your_checkpoint>` `--hubert-path <your_checkpoint>`
 
+### [FAILED] Gated Fusion Experiments
+- **Motivazione**: Testare se un gate apprendibile può dinamicamente scegliere il backbone migliore per ogni frame.
+- **Config**: Gate Network (Linear + Sigmoid) su concatenazione feature HuBERT+WavLM.
+- **Risultati**: ❌ **Total Failure**
+    - **HuBERT + WavLM Base**: Gate output collassa a 0.001 (solo WavLM), poi con regolarizzazione a 0.5. PER 96.02%, AUC 0.58. Output corrotto.
+    - **HuBERT + WavLM Large**: Stesso comportamento. PER 89.68%, output casuale.
+- **Analisi Post-Mortem**: 
+    1. **Optimization Difficulty**: Il gate network faticava a convergere senza pesanti regolarizzazioni.
+    2. **Feature Mismatch**: La somma pesata di embedding provenienti da spazi latenti diversi (HuBERT vs WavLM) distrugge la semantica necessaria per la CTC.
+    3. **Conclusioni**: La concatenazione (Early Fusion) funziona meglio perché preserva entrambe le feature per il layer successivo, invece di mischiarle linearmente.
+
+
 ---
 
 ## ✅ Lista Modelli Implementati

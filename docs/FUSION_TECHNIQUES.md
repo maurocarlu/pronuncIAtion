@@ -272,8 +272,22 @@ python scripts/training/train_gated_fusion.py \
     --wavlm-path outputs/backup/wavlm_weighted/final_model \
     --epochs 5 \
     --batch-size 2 \
-    --output-dir outputs/gated_fusion
+    --output-dir outputs/gated_fusion \
+    --gate-reg 0.1
 ```
+
+### ⚠️ Analisi Fallimenti (Gennaio 2026)
+
+Durante i test approfonditi sul dataset SpeechOcean762, questa tecnica ha mostrato **gravi problemi di ottimizzazione**, rendendola MENO efficace di Early e Late Fusion.
+
+**Problemi riscontrati:**
+1. **Gate Collapse**: Senza regolarizzazione, il gate tende a collassare su 0 o 1 nei primi step, ignorando completamente uno dei due backbone.
+   - *Fix tentato*: Introdotta entropy regularization (`--gate-reg`). Il gate si bilancia (~0.5), ma il modello non impara comunque.
+2. **CTC Loss Convergence Failure**: Anche con gate bilanciato, la loss scende ma l'output rimane "garbage" (CER/PER ≈ 100%).
+3. **Incompatibilità Rappresentazionale**: È probabile che gli spazi latenti di HuBERT e WavLM siano troppo disallineati perché una somma pesata lineare (anche se gated) produca feature coerenti per la CTC head.
+
+**Raccomandazione attuale**: Usare **Early Fusion** (concatenazione) o **Late Fusion** (ensemble soft), che si sono dimostrate molto più robuste.
+
 
 ---
 

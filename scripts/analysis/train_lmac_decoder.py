@@ -1,0 +1,133 @@
+#!/usr/bin/env python3
+"""Train L-MAC decoder on SpeechOcean762 (full dataset)."""
+
+import argparse
+import sys
+from pathlib import Path
+
+import torch
+from torch.utils.data import DataLoader
+from tqdm.auto import tqdm
+
+# Add project root to path (robust when executed as a script)
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(PROJECT_ROOT))
+
+from scripts.analysis.lmac_core import (
+    LMACBackboneConfig,
+    LMACSpeechOceanDataset,
+    LMACWrapper,
+    collate_audio_batch,
+)
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Train L-MAC decoder")
+    parser.add_argument("--model-path", type=str, required=True, help="Path to backbone checkpoint")
+    parser.add_argument("--backbone", type=str, default="hubert", choices=["hubert", "early_fusion"])
+    parser.add_argument("--target-phoneme", type=str, required=True, help="IPA phoneme to explain")
+    parser.add_argument("--layer-ids", type=str, default="6,12,18,24", help="Comma-separated layer ids")
+    parser.add_argument("--epochs", type=int, default=12)
+    parser.add_argument("--batch-size", type=int, default=2)
+    parser.add_argument("--lr", type=float, default=2e-4)
+    parser.add_argument("--lambda-out", type=float, default=1.0)
+    parser.add_argument("--lambda-reg", type=float, default=1e-4)
+    parser.add_argument("--max-samples", type=int, default=None)
+    parser.add_argument("--log-interval", type=int, default=50)
+    parser.add_argument("--output-dir", type=str, default="outputs/lmac")
+    return parser.parse_args()
+
+
+def train_lmac(args) -> Path:
+    layer_ids = tuple(int(x.strip()) for x in args.layer_ids.split(",") if x.strip())
+
+    config = LMACBackboneConfig(
+        backbone_type=args.backbone,
+        model_path=args.model_path,
+        layer_ids=layer_ids,
+    )
+
+    dataset = LMACSpeechOceanDataset(
+        split="train",
+        target_phoneme=args.target_phoneme,
+        full=True,
+        max_samples=args.max_samples,
+    )
+
+    loader = DataLoader(
+        dataset,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=0,
+        collate_fn=collate_audio_batch,
+    )
+
+    wrapper = LMACWrapper(config=config, target_phoneme=args.target_phoneme)
+    optimizer = torch.optim.Adam(wrapper.decoder.parameters(), lr=args.lr)
+
+    output_dir = Path(args.output_dir) / args.backbone / args.target_phoneme
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    epoch_pbar = tqdm(range(1, args.epochs + 1), desc="Training", unit="epoch")
+    for epoch in epoch_pbar:
+        wrapper.train()
+        total = 0.0
+        n = 0
+        step_pbar = tqdm(loader, desc=f"Epoch {epoch}/{args.epochs}", leave=False, unit="batch")
+        for step, batch in enumerate(step_pbar, start=1):
+            optimizer.zero_grad(set_to_none=True)
+            losses = wrapper.compute_loss(
+                batch["input_values"],
+                batch["attention_mask"],
+                lambda_out=args.lambda_out,
+                lambda_reg=args.lambda_reg,
+            )
+            loss = losses["loss"]
+            loss.backward()
+            optimizer.step()
+
+            total += float(loss.item())
+            n += 1
+            
+            # Update progress bar with current loss
+            step_pbar.set_postfix(loss=f"{total/n:.4f}")
+
+        avg = total / max(1, n)
+        epoch_pbar.set_postfix(loss=f"{avg:.4f}")
+        tqdm.write(f"Epoch {epoch}/{args.epochs} | loss={avg:.4f}")
+
+        # Save decoder checkpoint each epoch
+        torch.save(
+            {
+                "decoder_state": wrapper.decoder.state_dict(),
+                "target_phoneme": args.target_phoneme,
+                "layer_ids": layer_ids,
+                "backbone": args.backbone,
+                "model_path": args.model_path,
+            },
+            output_dir / f"decoder_epoch_{epoch}.pt",
+        )
+
+    # Save final decoder
+    torch.save(
+        {
+            "decoder_state": wrapper.decoder.state_dict(),
+            "target_phoneme": args.target_phoneme,
+            "layer_ids": layer_ids,
+            "backbone": args.backbone,
+            "model_path": args.model_path,
+        },
+        output_dir / "decoder_final.pt",
+    )
+
+    tqdm.write(f"✓ Decoder salvato in: {output_dir}")
+    return output_dir
+
+
+def main():
+    args = parse_args()
+    train_lmac(args)
+
+
+if __name__ == "__main__":
+    main()
