@@ -47,9 +47,13 @@ def train_lmac(args) -> Path:
         layer_ids=layer_ids,
     )
 
+    # Support None for multi-phoneme mode
+    target_phoneme = args.target_phoneme if args.target_phoneme else None
+    is_multi_phoneme = target_phoneme is None
+
     dataset = LMACSpeechOceanDataset(
         split="train",
-        target_phoneme=args.target_phoneme,
+        target_phoneme=target_phoneme,  # None = random sampling
         full=True,
         max_samples=args.max_samples,
     )
@@ -62,10 +66,12 @@ def train_lmac(args) -> Path:
         collate_fn=collate_audio_batch,
     )
 
-    wrapper = LMACWrapper(config=config, target_phoneme=args.target_phoneme)
+    wrapper = LMACWrapper(config=config, target_phoneme=target_phoneme)
     optimizer = torch.optim.Adam(wrapper.decoder.parameters(), lr=args.lr)
 
-    output_dir = Path(args.output_dir) / args.backbone / args.target_phoneme
+    # Output dir: use "multi" folder for multi-phoneme mode
+    phoneme_folder = target_phoneme if target_phoneme else "multi"
+    output_dir = Path(args.output_dir) / args.backbone / phoneme_folder
     output_dir.mkdir(parents=True, exist_ok=True)
 
     epoch_pbar = tqdm(range(1, args.epochs + 1), desc="Training", unit="epoch")
@@ -76,12 +82,24 @@ def train_lmac(args) -> Path:
         step_pbar = tqdm(loader, desc=f"Epoch {epoch}/{args.epochs}", leave=False, unit="batch")
         for step, batch in enumerate(step_pbar, start=1):
             optimizer.zero_grad(set_to_none=True)
-            losses = wrapper.compute_loss(
-                batch["input_values"],
-                batch["attention_mask"],
-                lambda_out=args.lambda_out,
-                lambda_reg=args.lambda_reg,
-            )
+            
+            # Multi-phoneme mode: pass per-batch target phonemes
+            if is_multi_phoneme:
+                losses = wrapper.compute_loss(
+                    batch["input_values"],
+                    batch["attention_mask"],
+                    target_phonemes=batch["target_phoneme"],  # List of phonemes per sample
+                    lambda_out=args.lambda_out,
+                    lambda_reg=args.lambda_reg,
+                )
+            else:
+                losses = wrapper.compute_loss(
+                    batch["input_values"],
+                    batch["attention_mask"],
+                    lambda_out=args.lambda_out,
+                    lambda_reg=args.lambda_reg,
+                )
+            
             loss = losses["loss"]
             loss.backward()
             optimizer.step()
@@ -100,7 +118,8 @@ def train_lmac(args) -> Path:
         torch.save(
             {
                 "decoder_state": wrapper.decoder.state_dict(),
-                "target_phoneme": args.target_phoneme,
+                "target_phoneme": target_phoneme,  # None for multi
+                "is_multi_phoneme": is_multi_phoneme,
                 "layer_ids": layer_ids,
                 "backbone": args.backbone,
                 "model_path": args.model_path,
@@ -112,7 +131,8 @@ def train_lmac(args) -> Path:
     torch.save(
         {
             "decoder_state": wrapper.decoder.state_dict(),
-            "target_phoneme": args.target_phoneme,
+            "target_phoneme": target_phoneme,
+            "is_multi_phoneme": is_multi_phoneme,
             "layer_ids": layer_ids,
             "backbone": args.backbone,
             "model_path": args.model_path,

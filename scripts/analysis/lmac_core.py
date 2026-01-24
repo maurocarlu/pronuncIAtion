@@ -307,7 +307,7 @@ class LMACWrapper(nn.Module):
     def __init__(
         self,
         config: LMACBackboneConfig,
-        target_phoneme: str,
+        target_phoneme: Optional[str] = None,  # None = multi-phoneme mode
         device: Optional[str] = None,
     ):
         super().__init__()
@@ -331,10 +331,15 @@ class LMACWrapper(nn.Module):
         from transformers import Wav2Vec2CTCTokenizer
 
         self.tokenizer = Wav2Vec2CTCTokenizer.from_pretrained(self.config.model_path)
-        vocab = self.tokenizer.get_vocab()
-        if self.target_phoneme not in vocab:
-            raise ValueError(f"Target phoneme '{self.target_phoneme}' non presente nel vocab.")
-        self.target_id = vocab[self.target_phoneme]
+        self.vocab = self.tokenizer.get_vocab()
+        
+        # Multi-phoneme mode: target_id will be set dynamically per batch
+        if self.target_phoneme is None:
+            self.target_id = None  # Will be set in compute_loss
+        else:
+            if self.target_phoneme not in self.vocab:
+                raise ValueError(f"Target phoneme '{self.target_phoneme}' non presente nel vocab.")
+            self.target_id = self.vocab[self.target_phoneme]
 
     def _init_backbone(self) -> None:
         if self.backbone_type == "hubert":
@@ -476,6 +481,7 @@ class LMACWrapper(nn.Module):
         self,
         input_values: torch.Tensor,
         attention_mask: torch.Tensor,
+        target_phonemes: Optional[List[str]] = None,  # Per multi-phoneme mode
         lambda_out: float = 1.0,
         lambda_reg: float = 1e-4,
         eps: float = 1e-8,
@@ -502,8 +508,22 @@ class LMACWrapper(nn.Module):
         probs_in = F.softmax(logits_in, dim=-1)
         probs_out = F.softmax(logits_out, dim=-1)
 
-        p_in = probs_in[..., self.target_id]
-        p_out = probs_out[..., self.target_id]
+        # Multi-phoneme mode: compute loss per-sample with different targets
+        if target_phonemes is not None:
+            # Get target IDs for each sample in batch
+            batch_size = probs_in.size(0)
+            p_in_list = []
+            p_out_list = []
+            for i, ph in enumerate(target_phonemes):
+                tid = self.vocab.get(ph, 0)  # Default to 0 if not found
+                p_in_list.append(probs_in[i, :, tid])
+                p_out_list.append(probs_out[i, :, tid])
+            p_in = torch.stack(p_in_list, dim=0)  # [B, T]
+            p_out = torch.stack(p_out_list, dim=0)
+        else:
+            # Single phoneme mode
+            p_in = probs_in[..., self.target_id]
+            p_out = probs_out[..., self.target_id]
 
         p_in_mean = (p_in * feat_mask).sum(dim=1) / (feat_mask.sum(dim=1) + eps)
         p_out_mean = (p_out * feat_mask).sum(dim=1) / (feat_mask.sum(dim=1) + eps)
