@@ -664,15 +664,7 @@ def generate_listenable_map(
              # For now, default to 0 to allow execution, but print warning.
              print("⚠️ Warning: No target_phoneme provided for conditional L-MAC. Using generic ID 0.")
              target_ids = torch.tensor([0], dtype=torch.long, device=wrapper.device)
-        curr_target = target_phoneme if target_phoneme else wrapper.target_phoneme
-        if curr_target:
-             tid = wrapper.vocab.get(curr_target, 0)
-             target_ids = torch.tensor([tid], dtype=torch.long, device=wrapper.device)
-        else:
-            # If no target specified and wrapper has none, this is ambiguous for conditional model
-            # We can try to infer from filename/metadata or just error/warn. 
-            # For now let's error if strictly required
-             raise ValueError("Conditional L-MAC requires a target_phoneme for map generation.")
+
 
     with torch.no_grad():
         out = wrapper.forward(input_values, attn_mask, target_ids=target_ids)
