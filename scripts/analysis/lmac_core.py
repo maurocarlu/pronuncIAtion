@@ -388,10 +388,13 @@ class _LMACLateFusionModel(nn.Module):
                 try:
                      m = AutoModel.from_pretrained(path, **kwargs)
                 except Exception as e2:
-                     # Final fallback: sometimes config loading fails but model load works if we don't pass local_files_only 
-                     # or if it's actually a repo ID.
-                     print(f"⚠️ AutoModel fallback failed: {e2}. Retrying without restrictions...")
-                     m = AutoModel.from_pretrained(path)
+                     # Final fallback: only retry if not local (to avoid HF validation error on paths)
+                     if not is_local:
+                         print(f"⚠️ AutoModel fallback failed: {e2}. Retrying without restrictions...")
+                         m = AutoModel.from_pretrained(path)
+                     else:
+                         print(f"❌ Failed to load local model at {path}. Check if path exists and contains config.json")
+                         raise e2
             
             if hasattr(m, "freeze_feature_encoder"):
                 m.freeze_feature_encoder()
