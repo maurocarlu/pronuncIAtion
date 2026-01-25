@@ -355,8 +355,9 @@ class _LMACLateFusionModel(nn.Module):
         from transformers import AutoModel, HubertForCTC, Wav2Vec2ForCTC
         
         for path in model_paths:
-            # Check if local path
-            is_local = os.path.exists(path)
+            # Check if local path: exists OR looks like an absolute path
+            # This prevents HF from validating it as a Repo ID if the file is missing but meant to be local
+            is_local = os.path.exists(path) or path.startswith("/") or path.startswith("\\")
             kwargs = {"local_files_only": True} if is_local else {}
             
             # Heuristic loading: try CTC, else generic
