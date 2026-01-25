@@ -644,7 +644,7 @@ class LMACWrapper(nn.Module):
         input_values = input_values.to(self.device)
         attention_mask = attention_mask.to(self.device)
 
-        if self.backbone_type == "hubert":
+        if self.backbone_type == "hubert" or self.backbone_type == "late_fusion":
             outputs = self.backbone(
                 input_values,
                 attention_mask=attention_mask,
@@ -654,7 +654,7 @@ class LMACWrapper(nn.Module):
             hidden_states = outputs.hidden_states
             feats = self._select_layers(hidden_states)
             logits_clean = outputs.logits
-        else:
+        elif self.backbone_type == "early_fusion":
             outputs = self.backbone(
                 input_values,
                 attention_mask=attention_mask,
@@ -666,6 +666,8 @@ class LMACWrapper(nn.Module):
             min_len = min(feats_h.size(1), feats_w.size(1))
             feats = torch.cat([feats_h[:, :min_len, :], feats_w[:, :min_len, :]], dim=-1)
             logits_clean = outputs["logits"]
+        else:
+             raise ValueError(f"Unknown backbone type: {self.backbone_type}")
 
         # Decoder expects [B, C, T_feat]
         feats = feats.transpose(1, 2)
