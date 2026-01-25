@@ -253,6 +253,9 @@ class LMACBackboneConfig:
     wavlm_name: str = "microsoft/wavlm-large"
     use_weighted_wavlm: bool = True
     layer_ids: Tuple[int, ...] = (6, 12, 18, 24)
+    # Late Fusion params
+    fusion_weights: Optional[List[float]] = None
+    ensemble_models: Optional[List[str]] = None  # List of paths/names
     use_conditioning: bool = False
     vocab_size: int = 0  # Required if use_conditioning=True
     embedding_dim: int = 64
@@ -324,6 +327,110 @@ class _LMACEarlyFusionModel(nn.Module):
             "wavlm_hidden_states": w_out.hidden_states,
             "last_hidden_state": combined,
         }
+
+
+class _LMACLateFusionModel(nn.Module):
+    """Ensemble of models for Late Fusion.
+    
+    Uses features from the 'dominant' model (highest weight) for the L-MAC decoder,
+    but computes loss against the weighted ensemble logits.
+    """
+    def __init__(
+        self,
+        model_paths: List[str],
+        weights: List[float],
+        device: str = "cpu"
+    ):
+        super().__init__()
+        self.models = nn.ModuleList()
+        self.weights = weights
+        self.model_paths = model_paths
+        
+        # Determine dominant model for feature extraction
+        import numpy as np
+        self.dominant_idx = int(np.argmax(weights))
+        print(f"🧩 Late Fusion: Dominant model for features is #{self.dominant_idx} ({model_paths[self.dominant_idx]})")
+        
+        from transformers import AutoModel, HubertForCTC, Wav2Vec2ForCTC
+        
+        for path in model_paths:
+            # Heuristic loading: try CTC, else generic
+            try:
+                # Assuming most are Hubert/WavLM and have the standard config
+                # We can try loading config first to see architecture
+                from transformers import AutoConfig
+                cfg = AutoConfig.from_pretrained(path)
+                archs = getattr(cfg, "architectures", [])
+                
+                if archs and "ForCTC" in archs[0]:
+                   if "Hubert" in archs[0]:
+                       m = HubertForCTC.from_pretrained(path)
+                   elif "WavLM" in archs[0]:
+                       from transformers import WavLMForCTC
+                       m = WavLMForCTC.from_pretrained(path)
+                   else:
+                       m = AutoModel.from_pretrained(path) # Fallback
+                elif "hubert" in str(path).lower():
+                    m = HubertForCTC.from_pretrained(path)
+                elif "wavlm" in str(path).lower():
+                    from transformers import WavLMForCTC
+                    m = WavLMForCTC.from_pretrained(path)
+                else:
+                    m = AutoModel.from_pretrained(path) # Fallback
+            except Exception as e:
+                print(f"⚠️ Error loading {path}, trying AutoModel: {e}")
+                m = AutoModel.from_pretrained(path)
+            
+            if hasattr(m, "freeze_feature_encoder"):
+                m.freeze_feature_encoder()
+            m.eval()
+            self.models.append(m)
+            
+    def forward(
+        self,
+        input_values: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        output_hidden_states: bool = True,
+        return_dict: bool =True
+    ) -> Any:
+        # 1. Forward all models to get logits
+        all_logits = []
+        dominant_hidden = None
+        
+        for i, model in enumerate(self.models):
+            # Move individual models to device if needed (or assume wrapper handles it)
+            # model.to(input_values.device) 
+            
+            out = model(input_values, attention_mask=attention_mask, output_hidden_states=True)
+            logits = out.logits if hasattr(out, "logits") else out["logits"]
+            all_logits.append(logits)
+            
+            if i == self.dominant_idx:
+                dominant_hidden = out.hidden_states if hasattr(out, "hidden_states") else out["hidden_states"]
+                
+        # 2. Weighted average of logits
+        # Stack: [N_models, B, T, Vocab]
+        # Check shapes consistency (time dim might vary slightly due to convs?)
+        # For now assume consistent architecture (Hubert/WavLM Large)
+        
+        # Weighted sum
+        avg_logits = torch.zeros_like(all_logits[0])
+        total_w = sum(self.weights)
+        
+        for logits, w in zip(all_logits, self.weights):
+             avg_logits += w * logits
+        
+        if total_w != 1.0 and total_w > 0:
+            avg_logits /= total_w
+            
+        # Return object similar to HF output
+        from transformers.modeling_outputs import CausalLMOutput
+        return CausalLMOutput(
+            loss=None,
+            logits=avg_logits,
+            hidden_states=dominant_hidden, # Only dominant features
+            attentions=None,
+        )
 
 
 # =============================================================================
@@ -409,6 +516,17 @@ class LMACWrapper(nn.Module):
             ).to(self.device)
             self._load_early_fusion_weights(self.config.model_path)
             self.backbone.eval()
+        elif self.backbone_type == "late_fusion":
+            # Late Fusion support
+            if not self.config.fusion_weights or not self.config.ensemble_models:
+                raise ValueError("Late Fusion requires fusion_weights and ensemble_models in config")
+                
+            self.backbone = _LMACLateFusionModel(
+                model_paths=self.config.ensemble_models,
+                weights=self.config.fusion_weights,
+                device=self.device
+            ).to(self.device)
+            self.backbone.eval()
         else:
             raise ValueError(f"backbone_type non supportato: {self.backbone_type}")
 
@@ -446,6 +564,11 @@ class LMACWrapper(nn.Module):
     def _compute_decoder_in_channels(self) -> int:
         if self.backbone_type == "hubert":
             hidden = int(self.backbone.config.hidden_size)
+            return hidden * len(self.layer_ids)
+        if self.backbone_type == "late_fusion":
+            # Uses dominant model config
+            dom_model = self.backbone.models[self.backbone.dominant_idx]
+            hidden = int(dom_model.config.hidden_size)
             return hidden * len(self.layer_ids)
         if self.backbone_type == "early_fusion":
             hidden_h = int(self.backbone.hubert.config.hidden_size)

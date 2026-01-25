@@ -47,16 +47,24 @@ def train_lmac(args) -> Path:
     if args.use_conditioning:
         from transformers import Wav2Vec2CTCTokenizer
         try:
-             # Try loading tokenizer from model path
-             tokenizer = Wav2Vec2CTCTokenizer.from_pretrained(args.model_path)
+             # Try loading tokenizer from model path or first ensemble path
+             path_to_load = args.model_path
+             if hasattr(args, "ensemble_models") and args.ensemble_models:
+                 path_to_load = args.ensemble_models[0]
+                 
+             tokenizer = Wav2Vec2CTCTokenizer.from_pretrained(path_to_load)
              vocab_size = len(tokenizer)
         except Exception as e:
             # Fallback for EarlyFusion where model_path might differ or specific structure
-            print(f"⚠️ Could not load tokenizer directly from {args.model_path}: {e}")
+            print(f"⚠️ Could not load tokenizer directly: {e}")
             # Try loading from standard Hubert path as fallback (common vocab)
             tokenizer = Wav2Vec2CTCTokenizer.from_pretrained("facebook/hubert-large-ls960-ft")
             vocab_size = len(tokenizer)
         print(f"🧠 Conditioning enabled. Vocab size: {vocab_size}")
+
+    # Extract fusion args if present
+    ensemble_models = getattr(args, "ensemble_models", None)
+    fusion_weights = getattr(args, "fusion_weights", None)
 
     config = LMACBackboneConfig(
         backbone_type=args.backbone,
@@ -64,6 +72,8 @@ def train_lmac(args) -> Path:
         layer_ids=layer_ids,
         use_conditioning=args.use_conditioning,
         vocab_size=vocab_size,
+        ensemble_models=ensemble_models,
+        fusion_weights=fusion_weights,
     )
 
     # Support None for multi-phoneme mode
