@@ -745,22 +745,22 @@ def compute_ai_ad(
         input_values = batch["input_values"].to(wrapper.device)
         attention_mask = batch["attention_mask"].to(wrapper.device)
 
-        # Prepare target_ids for conditional forward
+        # 1. Prepare target_ids for conditional forward
         target_ids = None
-        # Must determine batch_target_phonemes early for target_ids construction
         batch_target_phonemes = []
+        
         if is_multi_phoneme:
             batch_target_phonemes = batch.get("target_phoneme", [])
             if wrapper.config.use_conditioning:
                 tids = [wrapper.vocab.get(ph, 0) for ph in batch_target_phonemes]
                 target_ids = torch.tensor(tids, device=wrapper.device, dtype=torch.long)
         else:
-            # For single phoneme, we can't use logits_clean size yet as it's not computed.
-            # Use input_values size instead.
+            # Single-phoneme mode
             batch_target_phonemes = [wrapper.target_phoneme] * input_values.size(0)
             if wrapper.config.use_conditioning:
                 target_ids = torch.full((input_values.size(0),), wrapper.target_id, device=wrapper.device, dtype=torch.long)
 
+        # 2. Forward pass to get mask and logits
         with torch.no_grad():
             out = wrapper.forward(input_values, attention_mask, target_ids=target_ids)
             mask = out["mask"]
@@ -777,12 +777,10 @@ def compute_ai_ad(
             else:
                 logits_masked = wrapper.backbone(masked_audio, attention_mask=attention_mask)["logits"]
 
-        # Average prob for target class
+        # 3. Compute probabilities for the target phonemes
         feat_mask = wrapper._feat_mask_from_attention(attention_mask, logits_clean.size(1)).to(logits_clean.device)
         
-        batch_target_phonemes = []
         if is_multi_phoneme:
-            batch_target_phonemes = batch.get("target_phoneme", [])
             probs_clean_list = []
             probs_masked_list = []
             for i, ph in enumerate(batch_target_phonemes):
@@ -794,7 +792,6 @@ def compute_ai_ad(
         else:
             probs_clean = F.softmax(logits_clean, dim=-1)[..., wrapper.target_id]
             probs_masked = F.softmax(logits_masked, dim=-1)[..., wrapper.target_id]
-            batch_target_phonemes = [wrapper.target_phoneme] * logits_clean.size(0)
 
         p_clean = (probs_clean * feat_mask).sum(dim=1) / (feat_mask.sum(dim=1) + 1e-8)
         p_masked = (probs_masked * feat_mask).sum(dim=1) / (feat_mask.sum(dim=1) + 1e-8)
