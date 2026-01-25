@@ -420,22 +420,39 @@ class _LMACLateFusionModel(nn.Module):
         
         for i, model in enumerate(self.models):
             # Move individual models to device if needed (or assume wrapper handles it)
-            # model.to(input_values.device) 
+            # model.to(input_values.device)
             
-            out = model(input_values, attention_mask=attention_mask, output_hidden_states=True)
+            # Cast input to model dtype (e.g. half for fp16)
+            dtype = next(model.parameters()).dtype
+            if input_values.dtype != dtype:
+                _input = input_values.to(dtype)
+            else:
+                _input = input_values
+            
+            # Forward pass in model dtype
+            out = model(_input, attention_mask=attention_mask, output_hidden_states=True)
+            
             logits = out.logits if hasattr(out, "logits") else out["logits"]
+            # Cast back to float32 for stability and downstream compatibility
+            logits = logits.float()
+            
             all_logits.append(logits)
             
             if i == self.dominant_idx:
-                dominant_hidden = out.hidden_states if hasattr(out, "hidden_states") else out["hidden_states"]
+                h = out.hidden_states if hasattr(out, "hidden_states") else out["hidden_states"]
+                # Cast hidden states back to float32
+                if isinstance(h, (list, tuple)):
+                    dominant_hidden = tuple(x.float() for x in h)
+                else:
+                    dominant_hidden = h.float()
                 
         # 2. Weighted average of logits
         # Stack: [N_models, B, T, Vocab]
         # Check shapes consistency (time dim might vary slightly due to convs?)
         # For now assume consistent architecture (Hubert/WavLM Large)
         
-        # Weighted sum
-        avg_logits = torch.zeros_like(all_logits[0])
+        # Weighted sum (already in float32 since logits were cast)
+        avg_logits = torch.zeros_like(all_logits[0], dtype=torch.float32)
         total_w = sum(self.weights)
         
         for logits, w in zip(all_logits, self.weights):
