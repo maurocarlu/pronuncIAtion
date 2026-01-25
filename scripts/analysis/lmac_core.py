@@ -354,6 +354,12 @@ class _LMACLateFusionModel(nn.Module):
         
         from transformers import AutoModel, HubertForCTC, Wav2Vec2ForCTC
         
+        # Use float16 if cuda to save memory (like in sweep notebook)
+        use_fp16 = "cuda" in str(device) and torch.cuda.is_available()
+        dtype_args = {"torch_dtype": torch.float16} if use_fp16 else {}
+        if use_fp16:
+            print("🚀 Loading Late Fusion models in float16 to save memory")
+        
         for path in model_paths:
             # Check if local path: exists OR looks like an absolute path
             # This prevents HF from validating it as a Repo ID if the file is missing but meant to be local
@@ -370,28 +376,28 @@ class _LMACLateFusionModel(nn.Module):
                 
                 if archs and "ForCTC" in archs[0]:
                    if "Hubert" in archs[0]:
-                       m = HubertForCTC.from_pretrained(path, **kwargs)
+                       m = HubertForCTC.from_pretrained(path, **kwargs, **dtype_args)
                    elif "WavLM" in archs[0]:
                        from transformers import WavLMForCTC
-                       m = WavLMForCTC.from_pretrained(path, **kwargs)
+                       m = WavLMForCTC.from_pretrained(path, **kwargs, **dtype_args)
                    else:
-                       m = AutoModel.from_pretrained(path, **kwargs) # Fallback
+                       m = AutoModel.from_pretrained(path, **kwargs, **dtype_args) # Fallback
                 elif "hubert" in str(path).lower():
-                    m = HubertForCTC.from_pretrained(path, **kwargs)
+                    m = HubertForCTC.from_pretrained(path, **kwargs, **dtype_args)
                 elif "wavlm" in str(path).lower():
                     from transformers import WavLMForCTC
-                    m = WavLMForCTC.from_pretrained(path, **kwargs)
+                    m = WavLMForCTC.from_pretrained(path, **kwargs, **dtype_args)
                 else:
-                    m = AutoModel.from_pretrained(path, **kwargs) # Fallback
+                    m = AutoModel.from_pretrained(path, **kwargs, **dtype_args) # Fallback
             except Exception as e:
                 print(f"⚠️ Error loading {path}, trying AutoModel directly (local={is_local}): {e}")
                 try:
-                     m = AutoModel.from_pretrained(path, **kwargs)
+                     m = AutoModel.from_pretrained(path, **kwargs, **dtype_args)
                 except Exception as e2:
                      # Final fallback: only retry if not local (to avoid HF validation error on paths)
                      if not is_local:
                          print(f"⚠️ AutoModel fallback failed: {e2}. Retrying without restrictions...")
-                         m = AutoModel.from_pretrained(path)
+                         m = AutoModel.from_pretrained(path, **dtype_args)
                      else:
                          print(f"❌ Failed to load local model at {path}. Check if path exists and contains config.json")
                          raise e2
@@ -644,30 +650,32 @@ class LMACWrapper(nn.Module):
         input_values = input_values.to(self.device)
         attention_mask = attention_mask.to(self.device)
 
-        if self.backbone_type == "hubert" or self.backbone_type == "late_fusion":
-            outputs = self.backbone(
-                input_values,
-                attention_mask=attention_mask,
-                output_hidden_states=True,
-                return_dict=True,
-            )
-            hidden_states = outputs.hidden_states
-            feats = self._select_layers(hidden_states)
-            logits_clean = outputs.logits
-        elif self.backbone_type == "early_fusion":
-            outputs = self.backbone(
-                input_values,
-                attention_mask=attention_mask,
-                output_hidden_states=True,
-            )
-            feats_h = self._select_layers(outputs["hubert_hidden_states"])
-            feats_w = self._select_layers(outputs["wavlm_hidden_states"])
-            # Align temporal length
-            min_len = min(feats_h.size(1), feats_w.size(1))
-            feats = torch.cat([feats_h[:, :min_len, :], feats_w[:, :min_len, :]], dim=-1)
-            logits_clean = outputs["logits"]
-        else:
-             raise ValueError(f"Unknown backbone type: {self.backbone_type}")
+        # Run backbone frozen (no gradients needed for features/logits)
+        with torch.no_grad():
+            if self.backbone_type == "hubert" or self.backbone_type == "late_fusion":
+                outputs = self.backbone(
+                    input_values,
+                    attention_mask=attention_mask,
+                    output_hidden_states=True,
+                    return_dict=True,
+                )
+                hidden_states = outputs.hidden_states
+                feats = self._select_layers(hidden_states)
+                logits_clean = outputs.logits
+            elif self.backbone_type == "early_fusion":
+                outputs = self.backbone(
+                    input_values,
+                    attention_mask=attention_mask,
+                    output_hidden_states=True,
+                )
+                feats_h = self._select_layers(outputs["hubert_hidden_states"])
+                feats_w = self._select_layers(outputs["wavlm_hidden_states"])
+                # Align temporal length
+                min_len = min(feats_h.size(1), feats_w.size(1))
+                feats = torch.cat([feats_h[:, :min_len, :], feats_w[:, :min_len, :]], dim=-1)
+                logits_clean = outputs["logits"]
+            else:
+                 raise ValueError(f"Unknown backbone type: {self.backbone_type}")
 
         # Decoder expects [B, C, T_feat]
         feats = feats.transpose(1, 2)
@@ -735,12 +743,13 @@ class LMACWrapper(nn.Module):
 
         # Forward for fidelity losses (no grad on params, but grad wrt mask/input)
         attention_mask_device = attention_mask.to(self.device)
-        if self.backbone_type == "hubert":
-            logits_in = self.backbone(masked_audio, attention_mask=attention_mask_device, return_dict=True).logits
-            logits_out = self.backbone(removed_audio, attention_mask=attention_mask_device, return_dict=True).logits
-        else:
-            logits_in = self.backbone(masked_audio, attention_mask=attention_mask_device)["logits"]
-            logits_out = self.backbone(removed_audio, attention_mask=attention_mask_device)["logits"]
+        with torch.no_grad():
+            if self.backbone_type == "hubert" or self.backbone_type == "late_fusion":
+                logits_in = self.backbone(masked_audio, attention_mask=attention_mask_device, return_dict=True).logits
+                logits_out = self.backbone(removed_audio, attention_mask=attention_mask_device, return_dict=True).logits
+            else:
+                logits_in = self.backbone(masked_audio, attention_mask=attention_mask_device)["logits"]
+                logits_out = self.backbone(removed_audio, attention_mask=attention_mask_device)["logits"]
 
         # Average over time with mask
         feat_mask = self._feat_mask_from_attention(attention_mask, logits_in.size(1))
