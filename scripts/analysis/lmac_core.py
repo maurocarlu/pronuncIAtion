@@ -647,6 +647,24 @@ def generate_listenable_map(
     target_ids = None
     if wrapper.config.use_conditioning:
         curr_target = target_phoneme if target_phoneme else wrapper.target_phoneme
+        
+        # If still None, try to infer from metadata if available (requires decoding wrapper or similar context, 
+        # but here we only have audio_path. We can't easily get reference IPA without the dataset item.
+        # However, for consistency with notebook, we can try to rely on caller passing it.
+        # But to prevent crash if simple usage:
+        if curr_target:
+             tid = wrapper.vocab.get(curr_target, 0)
+             target_ids = torch.tensor([tid], dtype=torch.long, device=wrapper.device)
+        else:
+             # Try to find reference IPA from dataset if available or warn
+             # Since we don't have access to dataset here easily without loading it, 
+             # we will default to ID 0 with a warning, or fail if we want to be strict.
+             # Given user feedback, let's try to be helpful:
+             # If reference_ipa arg was passed (it isn't currently), we could use it.
+             # For now, default to 0 to allow execution, but print warning.
+             print("⚠️ Warning: No target_phoneme provided for conditional L-MAC. Using generic ID 0.")
+             target_ids = torch.tensor([0], dtype=torch.long, device=wrapper.device)
+        curr_target = target_phoneme if target_phoneme else wrapper.target_phoneme
         if curr_target:
              tid = wrapper.vocab.get(curr_target, 0)
              target_ids = torch.tensor([tid], dtype=torch.long, device=wrapper.device)
@@ -735,19 +753,6 @@ def compute_ai_ad(
         input_values = batch["input_values"].to(wrapper.device)
         attention_mask = batch["attention_mask"].to(wrapper.device)
 
-        # Prepare target_ids for conditional forward
-        target_ids = None
-        batch_target_phonemes = []
-        if is_multi_phoneme:
-            batch_target_phonemes = batch.get("target_phoneme", [])
-            if wrapper.config.use_conditioning:
-                tids = [wrapper.vocab.get(ph, 0) for ph in batch_target_phonemes]
-                target_ids = torch.tensor(tids, device=wrapper.device, dtype=torch.long)
-        else:
-            batch_target_phonemes = [wrapper.target_phoneme] * logits_clean.size(0)
-            if wrapper.config.use_conditioning:
-                # wrapper.target_id should be set
-                target_ids = torch.full((logits_clean.size(0),), wrapper.target_id, device=wrapper.device, dtype=torch.long)
 
         with torch.no_grad():
             out = wrapper.forward(input_values, attention_mask, target_ids=target_ids)
