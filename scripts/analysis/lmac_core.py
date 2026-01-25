@@ -354,32 +354,42 @@ class _LMACLateFusionModel(nn.Module):
         from transformers import AutoModel, HubertForCTC, Wav2Vec2ForCTC
         
         for path in model_paths:
+            # Check if local path
+            is_local = os.path.exists(path)
+            kwargs = {"local_files_only": True} if is_local else {}
+            
             # Heuristic loading: try CTC, else generic
             try:
                 # Assuming most are Hubert/WavLM and have the standard config
                 # We can try loading config first to see architecture
                 from transformers import AutoConfig
-                cfg = AutoConfig.from_pretrained(path)
+                cfg = AutoConfig.from_pretrained(path, **kwargs)
                 archs = getattr(cfg, "architectures", [])
                 
                 if archs and "ForCTC" in archs[0]:
                    if "Hubert" in archs[0]:
-                       m = HubertForCTC.from_pretrained(path)
+                       m = HubertForCTC.from_pretrained(path, **kwargs)
                    elif "WavLM" in archs[0]:
                        from transformers import WavLMForCTC
-                       m = WavLMForCTC.from_pretrained(path)
+                       m = WavLMForCTC.from_pretrained(path, **kwargs)
                    else:
-                       m = AutoModel.from_pretrained(path) # Fallback
+                       m = AutoModel.from_pretrained(path, **kwargs) # Fallback
                 elif "hubert" in str(path).lower():
-                    m = HubertForCTC.from_pretrained(path)
+                    m = HubertForCTC.from_pretrained(path, **kwargs)
                 elif "wavlm" in str(path).lower():
                     from transformers import WavLMForCTC
-                    m = WavLMForCTC.from_pretrained(path)
+                    m = WavLMForCTC.from_pretrained(path, **kwargs)
                 else:
-                    m = AutoModel.from_pretrained(path) # Fallback
+                    m = AutoModel.from_pretrained(path, **kwargs) # Fallback
             except Exception as e:
-                print(f"⚠️ Error loading {path}, trying AutoModel: {e}")
-                m = AutoModel.from_pretrained(path)
+                print(f"⚠️ Error loading {path}, trying AutoModel directly (local={is_local}): {e}")
+                try:
+                     m = AutoModel.from_pretrained(path, **kwargs)
+                except Exception as e2:
+                     # Final fallback: sometimes config loading fails but model load works if we don't pass local_files_only 
+                     # or if it's actually a repo ID.
+                     print(f"⚠️ AutoModel fallback failed: {e2}. Retrying without restrictions...")
+                     m = AutoModel.from_pretrained(path)
             
             if hasattr(m, "freeze_feature_encoder"):
                 m.freeze_feature_encoder()
