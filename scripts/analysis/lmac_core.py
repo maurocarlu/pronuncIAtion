@@ -753,6 +753,21 @@ def compute_ai_ad(
         input_values = batch["input_values"].to(wrapper.device)
         attention_mask = batch["attention_mask"].to(wrapper.device)
 
+        # Prepare target_ids for conditional forward
+        target_ids = None
+        # Must determine batch_target_phonemes early for target_ids construction
+        batch_target_phonemes = []
+        if is_multi_phoneme:
+            batch_target_phonemes = batch.get("target_phoneme", [])
+            if wrapper.config.use_conditioning:
+                tids = [wrapper.vocab.get(ph, 0) for ph in batch_target_phonemes]
+                target_ids = torch.tensor(tids, device=wrapper.device, dtype=torch.long)
+        else:
+            # For single phoneme, we can't use logits_clean size yet as it's not computed.
+            # Use input_values size instead.
+            batch_target_phonemes = [wrapper.target_phoneme] * input_values.size(0)
+            if wrapper.config.use_conditioning:
+                target_ids = torch.full((input_values.size(0),), wrapper.target_id, device=wrapper.device, dtype=torch.long)
 
         with torch.no_grad():
             out = wrapper.forward(input_values, attention_mask, target_ids=target_ids)
