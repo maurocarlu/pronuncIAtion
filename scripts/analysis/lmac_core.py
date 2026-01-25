@@ -484,9 +484,36 @@ class LMACWrapper(nn.Module):
             p.requires_grad = False
 
     def _init_tokenizer(self) -> None:
-        from transformers import Wav2Vec2CTCTokenizer
+        from transformers import AutoTokenizer
 
-        self.tokenizer = Wav2Vec2CTCTokenizer.from_pretrained(self.config.model_path)
+        # Determine path to load tokenizer from
+        path_to_load = self.config.model_path
+        if not path_to_load and self.config.ensemble_models:
+             path_to_load = self.config.ensemble_models[0]
+        
+        # If still empty (e.g. Early Fusion without model path?), fallback to standard
+        if not path_to_load:
+             print("⚠️ No model path for tokenizer, using facebook/hubert-large-ls960-ft")
+             path_to_load = "facebook/hubert-large-ls960-ft"
+
+        # Force local check if it's a local absolute path
+        kwargs = {}
+        if path_to_load and (os.path.exists(path_to_load) or path_to_load.startswith("/") or path_to_load.startswith("\\")):
+             kwargs["local_files_only"] = True
+
+        try:
+             self.tokenizer = AutoTokenizer.from_pretrained(path_to_load, **kwargs)
+        except Exception as e:
+             # Try standard CTC tokenizer if AutoTokenizer fails or specific config issues
+             print(f"⚠️ AutoTokenizer load failed from {path_to_load}: {e}. Retrying with transformers.Wav2Vec2CTCTokenizer...")
+             from transformers import Wav2Vec2CTCTokenizer
+             try:
+                self.tokenizer = Wav2Vec2CTCTokenizer.from_pretrained(path_to_load, **kwargs)
+             except Exception as e2:
+                print(f"⚠️ Fallback tokenizer failed: {e2}. Using standard HuBERT.")
+                self.tokenizer = Wav2Vec2CTCTokenizer.from_pretrained("facebook/hubert-large-ls960-ft")
+             
+        self.vocab = self.tokenizer.get_vocab()
         self.vocab = self.tokenizer.get_vocab()
         
         # Multi-phoneme mode: target_id will be set dynamically per batch
