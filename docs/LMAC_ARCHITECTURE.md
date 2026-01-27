@@ -23,6 +23,9 @@ flowchart LR
     subgraph S1 ["Stage 1: Universal Backbone Interface"]
         direction LR
         
+        %% Spacer to separate title from nodes
+        SpacerS1[ ]:::spacer
+        
         %% Nodes
         Audio1[("🔊 Raw Audio")]:::data
         Backbone1["❄️ Universal Backbone<br/>(HuBERT / WavLM / Fusion)<br/>[FROZEN]"]:::frozen
@@ -30,6 +33,7 @@ flowchart LR
         Feat1[("Features H")]:::data
         
         %% Connections
+        SpacerS1 ~~~ Audio1
         Audio1 --> Backbone1
         Backbone1 --> Standardizer1
         Standardizer1 --> Feat1
