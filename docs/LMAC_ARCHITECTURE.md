@@ -21,22 +21,30 @@ flowchart LR
     %% STAGE 1: UNIVERSAL INTERFACE
     %% ==========================================
     subgraph S1 ["Stage 1: Universal Backbone Interface"]
-        direction LR
+        direction TB
         
-        %% Spacer to separate title from nodes
+        %% Transparent spacer to push content down
         SpacerS1[ ]:::spacer
-        
-        %% Nodes
-        Audio1[("🔊 Raw Audio")]:::data
-        Backbone1["❄️ Universal Backbone<br/>(HuBERT / WavLM / Fusion)<br/>[FROZEN]"]:::frozen
-        Standardizer1["⚙️ Feature<br/>Standardizer"]:::operation
-        Feat1[("Features H")]:::data
-        
-        %% Connections
-        SpacerS1 ~~~ Audio1
-        Audio1 --> Backbone1
-        Backbone1 --> Standardizer1
-        Standardizer1 --> Feat1
+
+        %% Main Flow Subgraph (keeps boxes Left-to-Right)
+        subgraph S1_Flow [ ]
+            direction LR
+            style S1_Flow fill:none,stroke:none
+
+            %% Nodes
+            Audio1[("🔊 Raw Audio")]:::data
+            Backbone1["❄️ Universal Backbone<br/>(HuBERT / WavLM / Fusion)<br/>[FROZEN]"]:::frozen
+            Standardizer1["⚙️ Feature<br/>Standardizer"]:::operation
+            Feat1[("Features H")]:::data
+            
+            %% Connections
+            Audio1 --> Backbone1
+            Backbone1 --> Standardizer1
+            Standardizer1 --> Feat1
+        end
+
+        %% Force Vertical Layout: Spacer -> Flow
+        SpacerS1 ~~~ S1_Flow
     end
 
     %% ==========================================
