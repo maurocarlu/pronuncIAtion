@@ -73,26 +73,49 @@ flowchart LR
     style I fill:#c8e6c9
 ```
 
-### ⚙️ Parametri Trainabili
+### ⚙️ Dettagli Tecnici Implementativi
 
-| Componente | Parametri | Trainabile |
-|------------|-----------|------------|
-| HuBERT Large | 317M | ❌ Frozen |
-| WavLM Large | 317M | ❌ Frozen |
-| Layer Weights (WavLM) | 25 | ✅ |
-| CTC Head (2048→vocab) | ~88K | ✅ |
-| **Totale Trainabile** | ~88K | - |
+Il cuore dell'implementazione risiede nella classe `EarlyFusionModel` (o `MultiModelEarlyFusion` per n>2 modelli).
 
-### 💡 Vantaggi e Svantaggi
+**1. Gestione dei Backbone**
+I modelli (HuBERT, WavLM) vengono caricati usando `AutoModel`. È fondamentale notare che:
+- Vengono congelati (`requires_grad=False`) per evitare "catastrophic forgetting" e ridurre l'impronta VRAM.
+- Se attivato `use_weighted_wavlm`, per WavLM viene inizializzato un vettore di pesi paramterico `layer_weights` che apprende a combinare tutti i layer intermedi (weighted sum), mentre per HuBERT si usa tipicamente l'output dell'ultimo layer (`last_hidden_state`).
 
-| ✅ Vantaggi | ❌ Svantaggi |
-|------------|-------------|
-| Il classificatore vede entrambe le rappresentazioni | VRAM elevata (2 backbone) |
-| Può imparare pesi impliciti per contesto | Training più lento |
-| Singola forward pass per predizione | |
+**2. Allineamento e Concatenazione**
+```python
+# Forward pass semplificata
+with torch.no_grad():
+    h_hubert = self.hubert(audio).last_hidden_state  # [B, T, 1024]
+    
+    # WavLM (opzionale weighted sum)
+    outputs_w = self.wavlm(audio, output_hidden_states=True)
+    if self.use_weighted:
+        weights = F.softmax(self.layer_weights, dim=0)
+        h_wavlm = (torch.stack(outputs_w.hidden_states) * weights.view(-1,1,1,1)).sum(dim=0)
+    else:
+        h_wavlm = outputs_w.last_hidden_state
+
+# Concatenazione
+# Importante: Gestione discrepanze di lunghezza (1-2 frame) dovute a padding
+min_len = min(h_hubert.size(1), h_wavlm.size(1))
+combined = torch.cat([h_hubert[:, :min_len], h_wavlm[:, :min_len]], dim=-1) # [B, T, 2048]
+```
+
+**3. La CTC Head**
+Per evitare il problema del "CTC Collapse" (dove il modello predice solo blank token all'inizio del training), l'inizializzazione della head è critica:
+```python
+self.ctc_head = nn.Linear(2048, vocab_size)
+# Inizializzazione a media 0 e std 0.02 (stile BERT)
+nn.init.normal_(self.ctc_head.weight, mean=0.0, std=0.02)
+nn.init.zeros_(self.ctc_head.bias)
+```
+Il dropout (`0.1`) è applicato *prima* della proiezione lineare.
+
+**4. Quantizzazione**
+Abbiamo osservato instabilità con la quantizzazione 4-bit (`bitsandbytes`) quando si concatenano tensori di modelli diversi. Pertanto, l'Early Fusion è eseguita in **FP16** nativo (o FP32), disabilitando esplicitamente il caricamento 4-bit per stabilità.
 
 ### 📝 Uso
-
 ```bash
 python scripts/training/train_early_fusion.py \
     --hubert-path outputs/backup/hubert/final_model \
@@ -179,24 +202,25 @@ python scripts/evaluation/evaluate_hubert_fusion.py \
 
 ### 📐 Formula Matematica
 
-A differenza di Late Fusion che usa un peso fisso α, Gated Fusion apprende un **gate dinamico** per ogni timestep:
+A differenza di Late Fusion che usa un peso fisso α, Gated Fusion apprende un **gate dinamico** per ogni timestep. La formulazione cambia leggermente se usiamo 2 o 3 modelli.
 
-```
-h_hubert = HuBERT_encoder(audio)  # [batch, time, 1024]
-h_wavlm = WavLM_encoder(audio)    # [batch, time, 1024]
+**Caso 2 Modelli (Sigmoid Gate):**
+```python
+gate_input = concat([h_a, h_b])          # [batch, time, dim_a+dim_b]
+gate = sigmoid(Linear(gate_input))       # [batch, time, 1] ∈ (0, 1)
 
-# Gate Network: decide quanto pesare ogni backbone per ogni timestep
-gate_input = concat([h_hubert, h_wavlm], dim=-1)  # [batch, time, 2048]
-gate = σ(W_gate · gate_input + b_gate)            # [batch, time, 1] in [0, 1]
-
-# Fusione pesata dinamica
-h_fused = gate * h_hubert + (1 - gate) * h_wavlm  # [batch, time, 1024]
-
-# CTC Head
-logits = CTC_head(dropout(h_fused))
+h_fused = gate * h_a + (1 - gate) * h_b
 ```
 
-### 🏗️ Architettura
+**Caso 3 Modelli (Softmax Gate):**
+```python
+gate_input = concat([h_a, h_b, h_c])     # [batch, time, dim_tot]
+gates = softmax(Linear(gate_input))      # [batch, time, 3]
+
+h_fused = gates[0]*h_a + gates[1]*h_b + gates[2]*h_c
+```
+
+### 🏗️ Architettura (Caso 2 Modelli)
 
 ```mermaid
 flowchart TB
@@ -262,18 +286,16 @@ gate_values = model.get_gate_statistics(audio)
 | Peso adattivo per contesto | Richiede training |
 | Interpretabilità (analisi gate) | Parametri extra (pochi) |
 | Output 1024D (meno CTC params) | Leggermente più complesso |
-| Può specializzarsi per tipo fonema | |
+| Può specializzarsi per tipo fonema | **Instabilità Training** (vedi sotto) |
 
 ### 📝 Uso
 
 ```bash
-python scripts/training/train_gated_fusion.py \
-    --hubert-path outputs/backup/hubert/final_model \
-    --wavlm-path outputs/backup/wavlm_weighted/final_model \
-    --epochs 5 \
-    --batch-size 2 \
-    --output-dir outputs/gated_fusion \
-    --gate-reg 0.1
+python scripts/training/train_multi_fusion.py \
+    --model-a outputs/backup/hubert/final_model \
+    --model-b outputs/backup/wavlm_weighted/final_model \
+    --fusion-type gated \
+    --epochs 5
 ```
 
 ### ⚠️ Analisi Fallimenti (Gennaio 2026)

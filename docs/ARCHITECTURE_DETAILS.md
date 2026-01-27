@@ -319,32 +319,49 @@ flowchart LR
 ### 🛠️ Implementazione
 
 ```python
+import torch.nn.functional as F
+
 class EarlyFusionModel(nn.Module):
-    def __init__(self, vocab_size=45):
+    def __init__(self, vocab_size=45, use_weighted_wavlm=True):
         super().__init__()
         # Backbone 1: HuBERT (frozen, può caricare da ForCTC fine-tuned)
         # Lo script estrae automaticamente encoder da HubertForCTC
         self.hubert = HubertModel.from_pretrained("your_finetuned_hubert")
-        for p in self.hubert.parameters():
-            p.requires_grad = False
+        for p in self.hubert.parameters(): p.requires_grad = False
         
         # Backbone 2: WavLM Large (frozen, può caricare da ForCTC fine-tuned)
         # Lo script estrae automaticamente encoder da WavLMForCTC
         self.wavlm = WavLMModel.from_pretrained("your_finetuned_wavlm")
-        for p in self.wavlm.parameters():
-            p.requires_grad = False
+        for p in self.wavlm.parameters(): p.requires_grad = False
+        
+        if use_weighted_wavlm:
+             self.layer_weights = nn.Parameter(torch.zeros(25)) # per 24 layer + embed
         
         # CTC Head (unico trainable)
         self.dropout = nn.Dropout(0.1)
         self.ctc_head = nn.Linear(2048, vocab_size)  # 1024+1024
+        
+        # Inizializzazione anti-collapse
+        nn.init.normal_(self.ctc_head.weight, mean=0.0, std=0.02)
+        nn.init.zeros_(self.ctc_head.bias)
     
     def forward(self, audio):
-        # Estrai feature da entrambi
-        h_hubert = self.hubert(audio).last_hidden_state  # [B, T, 1024]
-        h_wavlm = self.wavlm(audio).last_hidden_state    # [B, T, 1024]
+        # Estrai feature da entrambi (no_grad)
+        with torch.no_grad():
+            h_hubert = self.hubert(audio).last_hidden_state
+            
+            # WavLM: Weighted Sum o Last Hidden
+            if hasattr(self, 'layer_weights'):
+                outputs = self.wavlm(audio, output_hidden_states=True)
+                weights = F.softmax(self.layer_weights, dim=0)
+                h_wavlm = (torch.stack(outputs.hidden_states) * weights.view(-1,1,1,1)).sum(dim=0)
+            else:
+                h_wavlm = self.wavlm(audio).last_hidden_state
         
         # Concatenazione Early Fusion
-        combined = torch.cat([h_hubert, h_wavlm], dim=-1)  # [B, T, 2048]
+        # Gestione mismatch lunghezza dovuta a stride/padding
+        min_len = min(h_hubert.size(1), h_wavlm.size(1))
+        combined = torch.cat([h_hubert[:, :min_len], h_wavlm[:, :min_len]], dim=-1)
         
         # CTC
         logits = self.ctc_head(self.dropout(combined))
@@ -379,7 +396,7 @@ class EarlyFusionModel(nn.Module):
 
 **Soluzione**: Gated Fusion apprende un **gate dinamico per ogni timestep** che decide quanto pesare ciascun backbone.
 
-> **Documentazione completa**: Vedi [FUSION_TECHNIQUES.md](FUSION_TECHNIQUES.md) per dettagli approfonditi.
+> **Documentazione completa**: Vedi [FUSION_TECHNIQUES.md](FUSION_TECHNIQUES.md) per dettagli approfonditi e diagrammi aggiornati per architetture a 2 e 3 modelli.
 
 ### 📐 Formula Matematica
 
